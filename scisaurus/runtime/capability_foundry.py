@@ -2605,7 +2605,12 @@ class CapabilityFoundry:
     def generate(self, brief, *, test_input=None, required_intent=None, client=None,
                  work_cache=None, on_progress=None, deadline=None,
                  model_call_budget=None, model_call_allowance=None,
-                 repair_provenance=None, resume_work_ref=None):
+                 repair_provenance=None, resume_work_ref=None, submitted_candidate=None):
+        if submitted_candidate is not None:
+            from scisaurus.runtime.mission_research import ResearcherSubmittedCandidate
+            if (not isinstance(submitted_candidate, ResearcherSubmittedCandidate)
+                    or self.author_backend is None or client is not None or self.max_attempts != 1):
+                raise ValidationError("submitted research requires an owned DSH candidate and one admission attempt")
         if resume_work_ref is not None and work_cache is None:
             raise ValidationError("foundry format resume requires its durable work cache")
         if model_call_budget is not None and (
@@ -2656,7 +2661,7 @@ class CapabilityFoundry:
             if model_call_budget is not None or model_call_allowance is not None:
                 raise ValidationError("DSH batch cannot bypass an explicit per-call allowance; an admission-aware provider relay is required")
             from scisaurus.runtime.dsh_batch import DshAuthorClient
-            client = DshAuthorClient(self.author_backend, root=self.workspace_root / "dsh-jobs",
+            client = submitted_candidate or DshAuthorClient(self.author_backend, root=self.workspace_root / "dsh-jobs",
                                      runtime_python=self.runtime_python, laboratory=self.laboratory,
                                      development_session=self.development_session)
         elif client is None:
@@ -2684,6 +2689,9 @@ class CapabilityFoundry:
                 "config_sha256": hashlib.sha256(canonical_bytes(self.author_backend)).hexdigest(),
             }
             client.base_assignment = deepcopy_config(base_prompt)
+        if submitted_candidate is not None:
+            base_prompt["submitted_candidate_sha256"] = hashlib.sha256(
+                canonical_bytes(submitted_candidate.candidate)).hexdigest()
         if resume_work_ref is not None and work_cache is not None:
             if not resume_work_ref.startswith(f"artifact:{work_cache.namespace}/"):
                 raise ValidationError("foundry format resume references a foreign work namespace")
@@ -2794,6 +2802,13 @@ class CapabilityFoundry:
                         resumable_response.pop("cache_ref", None)
                         unresolved_delegated = True
                         break
+                    if submitted_candidate is not None:
+                        prior_candidate = (prior.get("outcome", {}).get("candidate")
+                                           if prior.get("status") == "succeeded" else prior.get("last_attempt"))
+                        if (not isinstance(prior_candidate, dict)
+                                or any(canonical_bytes(prior_candidate.get(field)) != canonical_bytes(value)
+                                       for field, value in submitted_candidate.candidate.items())):
+                            continue
                     if canonical_bytes(prior.get("assignment")) == canonical_bytes(base_prompt):
                         response = prior.get("last_response")
                         requests = prior.get("requests", [])
@@ -4808,7 +4823,7 @@ class CapabilityFoundry:
                          last_failure_gate="delegated_batch")
             save("delegated_batch_unknown_retained")
             owner = client if last_request.get("role", author_role) == author_role else self.validator_client
-            raise DshBatchError(error, receipt=last_request.get("batch_receipt") or owner.runner.root,
+            raise DshBatchError(error, receipt=last_request.get("batch_receipt") or getattr(getattr(owner, "runner", None), "root", self.workspace_root),
                                 usage=state.get("usage", {}),
                                 provider_failure=last_request.get("provider_failure"))
         if state["status"] == "blocked" and isinstance(
@@ -5095,9 +5110,9 @@ class CapabilityFoundry:
                            "request_signature": request_signature,
                            "max_output_tokens": getattr(client, "max_output_tokens", None),
                            "reasoning_effort": getattr(client, "reasoning_effort", None),
-                           "usage": {"model_calls": 1}}
+                           "usage": {"model_calls": 0 if submitted_candidate is not None else 1}}
                 state["requests"].append(request)
-                state["usage"]["model_calls"] = state["usage"].get("model_calls", 0) + 1
+                state["usage"]["model_calls"] = state["usage"].get("model_calls", 0) + request["usage"]["model_calls"]
                 state["status"] = "calling"
                 save("calling")
                 try:

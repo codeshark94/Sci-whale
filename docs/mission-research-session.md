@@ -1,0 +1,80 @@
+# Persistent mission researcher
+
+A stopped mission with an admitted question can transfer its remaining research
+process to the existing project-owned DSH development session. The researcher
+owns literature use, theoretical analysis, controls, source revisions, tool
+selection, interpretation and final synthesis. The controller exposes tools,
+records observed feedback and preserves checkpoints. It does not run an agenda
+model or a pre-execution stage committee in this mode.
+
+## Control registration and resume
+
+Use `ComposerRunner(workflow, resume=True, control_only=True)` and call
+`set_research_process("session_led")`. This registers an immutable mission-wide
+policy bound to the workflow, original question, checkpoint and existing session.
+It preserves the workflow, historical stage contexts, scientific inputs, receipts
+and cumulative usage. The experiment-only policy remains available for workflows
+that use the stage scheduler; the mission policy takes precedence over it.
+
+Registration cannot execute research. `authorize_research_resume(evidence)` is a
+separate stopped control operation requiring an externally observed recovery
+source, a nonfuture timestamp with timezone, and official reconciliation references.
+Unsettled researcher or foundry dispatches block authorization. An orchestration
+change cannot settle a paid unknown outcome, refresh a exhausted generation
+contract, or establish account capacity. No provider probe is part of this API.
+New provider failures revoke the prior resume authorization.
+
+## Research loop
+
+The persistent researcher chooses one declared operation and receives the actual
+controller observation in its next turn. Supported operations include literature
+and source access, installed-runtime inspection, recorded computation, immutable
+artifact access, research notes, frozen pilot description and explicit independent
+pilot evaluation. The retained literature catalogue and original engineering
+receipts are available through their verified references and immutable files.
+Checkpoint notes are researcher statements with no scientific admission authority.
+
+The frozen pilot assignment belongs to the current control-store head and retained
+question. The researcher supplies complete executor source and scientific intent,
+and dispositions with evidence for every retained theoretical/control objection.
+The admission service consumes that already paid candidate once. It cannot launch
+another author session, author a repair or fall back to a different author model.
+A known rejection returns the observed repair evidence to the same researcher.
+
+`run` records computation; its receipt alone is not validation. `evaluate_pilot`
+requests the existing admission and experiment services: current preview,
+separately authored blinded validator, fresh replay, independent recalculation,
+scientific review and a fresh evaluation project. The validator receives no
+producer development handle or history. A pending or unknown evaluation retains
+its candidate and observations and blocks further execution or literature
+expansion. An identical rejected request returns its retained feedback. Runtime
+and result ownership are rechecked before successful evidence reuse.
+
+## Acceptance and recovery
+
+The final proposal includes the current independently accepted result, summary
+and limitations. A fresh isolated read-only scientific audit checks the original
+question, theoretical scope, controls, uncertainty, novelty and usefulness against
+current source and complete raw observations. A limited pilot or a successful
+arithmetic reduction cannot complete the mission. A valid null may be accepted.
+The original required workflow outputs and outstanding work orders remain gates.
+Accepted completion preserves the previous stage context in an immutable artifact;
+release approval follows the original workflow policy.
+
+Tool and final-audit unknown outcomes remain sealed, including their original paid
+usage. `reconcile_research_operation(ref, recovery_ref)` requires the current exact
+operation and an official `research-operation-reconciliation-1` proof binding its
+reference, body digest, receipt and usage, with disposition
+`paid_unknown_history_only`. It releases a hold without adopting an unknown answer.
+Underlying dispatch reconciliation is required first. Recovery never overwrites
+old execution projects, or changes an unknown receipt to scientific success.
+`reconcile_research_primary(receipt_sha256)` settles a reaped primary unknown
+transport only against its exact sealed paid checkpoint and original session
+binding. Its immutable receipt and unknown scientific outcome stay in history;
+accounting settlement does not authorize provider calls or adopt partial output.
+
+The primary reserves one host model slot; nested independent experiment services
+use at most the remaining slots. All dispatches retain finite watchdogs and the
+original mission time policy. Registration, offline tests and controller contract
+consumption are distinct from live primary/solver/validator consumption and from
+scientific completion.

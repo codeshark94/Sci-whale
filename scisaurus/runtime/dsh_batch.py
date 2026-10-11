@@ -273,7 +273,7 @@ class DshBatchRunner:
         if exchange is not None:
             if not callable(exchange):
                 raise ValidationError("batch exchange must be callable")
-            state.update(schema_version="dsh-controller-session-receipt-1", turns=[])
+            state.update(schema_version="dsh-controller-session-receipt-1", turns=[], outcome_known=False)
         frozen_boundaries = [(frozen, bound)]
         def save():
             tmp = receipt.with_suffix(".tmp")
@@ -807,7 +807,8 @@ class DshStructuredProducerClient:
             self.task(projected),
             inputs=self.input_files(projected, system),
             outputs=["response.json"],
-            deadline=time.monotonic() + self.timeout_seconds, **options)
+            deadline=min(time.monotonic() + self.timeout_seconds,
+                         getattr(self, "deadline", None) or float("inf")), **options)
         try:
             response = json_object(result["files"]["response.json"].decode("utf-8"),
                                    "DSH " + self.deliverable_label + " response")

@@ -1420,6 +1420,189 @@ class ComposerRunner:
             self._checkpoint_stopped_control("operator:experiment_review")
         return {"artifact_ref": receipt["artifact_ref"], "body_sha256": receipt["body_hash"]}
 
+    def set_research_process(self, mode):
+        """Register a mission-wide researcher owner at a stopped checkpoint."""
+        from scisaurus.runtime.run_control import save_control
+        self._require_stopped_control()
+        checkpoint, _ = self._stopped_execution_checkpoint()
+        if mode not in {"stage_graph", "session_led"}:
+            raise ValidationError("research process must be stage_graph or session_led")
+        if mode == "session_led" and (self._software_author_backend_config() is None
+                                       or getattr(self, "laboratory_binding", None) is None):
+            raise StateError("mission researcher requires its attested DSH backend")
+        questions = {key: {field: value["topic"][field] for field in ("id", "research_question")}
+                     for key, value in self.context.items()
+                     if isinstance(value, dict) and isinstance(value.get("topic"), dict)
+                     and all(value["topic"].get(field) for field in ("id", "research_question"))}
+        if not questions:
+            raise StateError("mission migration requires its retained admitted question")
+        current = self._research_process_policy()
+        if current and current["mode"] == mode:
+            return current
+        state = self._read_json_object(self.root / "development-session/session.json") or {}
+        if not state.get("session_id"):
+            raise StateError("mission migration requires the existing development session")
+        control = self._read_json_object(self.root / "output/run-control.json") or {}
+        record = self._publish("command/operator/research-process", "decision_note", {
+            "schema_version": "operator-research-process-1", "workflow_id": self.workflow["id"],
+            "workflow_sha256": hashlib.sha256(canonical_bytes(self.workflow)).hexdigest(),
+            "mode": mode, "scope": "mission", "questions": questions,
+            "development_session": development_session_binding(self.root), "session_id": state["session_id"],
+            "checkpoint_ref": checkpoint["artifact_ref"], "checkpoint_sha256": checkpoint["body_hash"],
+            "resume_requires_external_confirmation": True,
+        }, "command.operator", subjects=[checkpoint["artifact_ref"]])
+        control.pop("research_resume_authorization_ref", None)
+        save_control(self.root / "output", {**control, "research_process_policy_ref": record["artifact_ref"]})
+        self._checkpoint_stopped_control("operator:research_process")
+        return self._research_process_policy()
+
+    def _research_process_policy(self):
+        control = self._read_json_object(self.root / "output/run-control.json") or {}
+        ref = control.get("research_process_policy_ref")
+        head = self.store.head("command/operator/research-process")
+        if ref is None:
+            if head is not None:
+                raise StateError("mission researcher policy lost its control binding")
+            return None
+        manifest, _, body = self._read_verified_artifact_json(ref)
+        checkpoint, _, prior = self._read_verified_artifact_json(body.get("checkpoint_ref"))
+        questions = {key: {field: value["topic"][field] for field in ("id", "research_question")}
+                     for key, value in self.context.items()
+                     if isinstance(value, dict) and isinstance(value.get("topic"), dict)
+                     and all(value["topic"].get(field) for field in ("id", "research_question"))}
+        state = self._read_json_object(self.root / "development-session/session.json") or {}
+        if (head is None or ref != head["artifact_ref"] or manifest.get("author") != "command.operator"
+                or body.get("schema_version") != "operator-research-process-1"
+                or body.get("scope") != "mission" or body.get("mode") not in {"stage_graph", "session_led"}
+                or body.get("workflow_id") != self.workflow["id"]
+                or body.get("workflow_sha256") != hashlib.sha256(canonical_bytes(self.workflow)).hexdigest()
+                or body.get("questions") != questions
+                or body.get("development_session") != development_session_binding(self.root)
+                or body.get("session_id") != state.get("session_id")
+                or checkpoint.get("author") != "command.composer"
+                or checkpoint.get("body_hash") != body.get("checkpoint_sha256")
+                or prior.get("workflow_id") != self.workflow["id"]):
+            raise StateError("mission researcher policy has a foreign question, workflow, session, or checkpoint")
+        return {"mode": body["mode"], "scope": "mission", "artifact_ref": ref,
+                "body_sha256": manifest["body_hash"], "session_id": body["session_id"]}
+
+    def authorize_research_resume(self, evidence):
+        """Record externally observed recovery without probing the provider."""
+        from scisaurus.runtime.run_control import save_control
+        self._require_stopped_control()
+        policy = self._research_process_policy()
+        if policy is None or policy["mode"] != "session_led":
+            raise StateError("research resume requires an owned mission researcher policy")
+        if (not isinstance(evidence, dict) or set(evidence) != {"source", "observed_at", "reconciliation_refs"}
+                or any(not isinstance(evidence.get(key), str) or not evidence[key].strip()
+                       for key in ("source", "observed_at"))
+                or not isinstance(evidence["reconciliation_refs"], list)):
+            raise ValidationError("research recovery requires an external source, observation time, and reconciliation references")
+        from datetime import datetime, timezone
+        try:
+            observed = datetime.fromisoformat(evidence["observed_at"].replace("Z", "+00:00"))
+            if observed.tzinfo is None or observed > datetime.now(timezone.utc):
+                raise ValueError("recovery observation must be an actual past UTC observation")
+        except ValueError as exc:
+            raise ValidationError("recovery observation requires a nonfuture timezone-aware timestamp") from exc
+        self._require_settled_research_frontier()
+        for ref in evidence["reconciliation_refs"]:
+            manifest, _, _ = self._read_verified_artifact_json(ref)
+            if manifest.get("author") != "command.recovery":
+                raise StateError("unknown dispatch reconciliation requires an owned recovery artifact")
+        record = self._publish("command/operator/research-resume", "decision_note", {
+            "schema_version": "operator-research-resume-1", "workflow_id": self.workflow["id"],
+            "policy": policy, "evidence": deepcopy(evidence),
+        }, "command.operator", subjects=[policy["artifact_ref"], *evidence["reconciliation_refs"]])
+        control = self._read_json_object(self.root / "output/run-control.json") or {}
+        save_control(self.root / "output", {**control, "research_resume_authorization_ref": record["artifact_ref"]})
+        self._checkpoint_stopped_control("operator:research_resume_authorized")
+        return {"artifact_ref": record["artifact_ref"], "body_sha256": record["body_hash"]}
+
+    def _require_settled_research_frontier(self):
+        """Changing orchestration never grants another attempt to an unknown dispatch."""
+        from scisaurus.runtime.development_session import DevelopmentSession
+        state = self._read_json_object(self.root / "development-session/session.json") or {}
+        if state.get("active_job"):
+            raise StateError("existing researcher dispatch requires official reconciliation")
+        session = DevelopmentSession(development_session_binding(self.root))
+        for call in state.get("calls", []):
+            path = Path(call["receipt"])
+            raw = path.read_bytes()
+            if hashlib.sha256(raw).hexdigest() != call["sha256"]:
+                raise StateError("researcher receipt changed")
+            receipt = json.loads(raw)
+            if receipt.get("status") == "result_unknown" and not session._reconciled_unknown(call, receipt):
+                raise StateError("paid unknown researcher dispatch requires official reconciliation")
+        cache = ModelWorkCache(self.store, self._publish, namespace="command/foundry-work")
+        for entry in cache.entries():
+            current = cache.recovery_entry(entry)
+            requests = current.get("requests", [])
+            if requests and requests[-1].get("status") in {"started", "result_unknown"}:
+                raise StateError("paid unknown foundry dispatch requires official reconciliation before research resume")
+
+    def reconcile_research_operation(self, ref, recovery_ref):
+        """Release an accounted tool hold using its exact official recovery proof."""
+        self._require_stopped_control()
+        self._require_research_resume_authorized()
+        self._require_settled_research_frontier()
+        manifest, _, body = self._read_verified_artifact_json(ref)
+        proof_manifest, _, proof = self._read_verified_artifact_json(recovery_ref)
+        if (manifest.get("author") != "command.research-session"
+                or not manifest.get("artifact_id", "").startswith(("command/research-session/tools/", "command/research-session/final-reviews/"))
+                or self.store.head(manifest["artifact_id"])["artifact_ref"] != ref
+                or body.get("policy") != self._research_process_policy()
+                or body.get("status") not in {"started", "result_unknown"}
+                or proof_manifest.get("author") != "command.recovery"
+                or proof.get("schema_version") != "research-operation-reconciliation-1"
+                or proof.get("operation_ref") != ref or proof.get("operation_sha256") != manifest["body_hash"]
+                or proof.get("disposition") != "paid_unknown_history_only"
+                or proof.get("usage") != body.get("observation", body).get("usage", {})
+                or proof.get("receipt") != body.get("observation", body).get("receipt")):
+            raise StateError("research tool recovery requires its exact accounted unknown operation proof")
+        record = self._publish(manifest["artifact_id"], "decision_note", {
+            **body, "status": "reconciled", "prior_unknown_ref": ref, "recovery_ref": recovery_ref,
+        }, "command.research-session", subjects=[ref, recovery_ref])
+        head = self.store.head("command/research-session/state")
+        if head:
+            _, _, state = self._read_verified_artifact_json(head["artifact_ref"])
+            if state.get("pending_evaluation") == manifest["artifact_id"]:
+                self._publish("command/research-session/state", "decision_note", {
+                    **state, "pending_evaluation": None,
+                }, "command.research-session", subjects=[head["artifact_ref"], record["artifact_ref"]])
+        self._checkpoint_stopped_control("operator:research_operation_reconciled")
+        return {"artifact_ref": record["artifact_ref"], "body_sha256": record["body_hash"]}
+
+    def reconcile_research_primary(self, receipt_sha256):
+        """Account an unknown primary response without treating it as scientific output."""
+        from scisaurus.runtime.development_session import DevelopmentSession
+        self._require_stopped_control()
+        policy = self._research_process_policy()
+        if policy is None or policy["mode"] != "session_led":
+            raise StateError("primary reconciliation requires its mission-wide session owner")
+        checkpoint, _ = self._stopped_execution_checkpoint()
+        backend = self._software_author_backend_config()
+        if backend is None:
+            raise StateError("primary reconciliation requires its original backend")
+        record = DevelopmentSession(development_session_binding(self.root)).reconcile_accounted_unknown(
+            backend["author_backend"],self.store,checkpoint_ref=checkpoint["artifact_ref"],
+            policy_ref=policy["artifact_ref"],receipt_sha256=receipt_sha256)
+        self._checkpoint_stopped_control("operator:research_primary_reconciled")
+        return {"artifact_ref":record["artifact_ref"],"body_sha256":record["body_hash"]}
+
+    def _require_research_resume_authorized(self):
+        policy = self._research_process_policy()
+        control = self._read_json_object(self.root / "output/run-control.json") or {}
+        ref = control.get("research_resume_authorization_ref")
+        if policy is None or policy["mode"] != "session_led" or not ref:
+            raise StateError("mission researcher is held pending externally confirmed quota recovery")
+        manifest, _, body = self._read_verified_artifact_json(ref)
+        if (manifest.get("author") != "command.operator"
+                or body.get("schema_version") != "operator-research-resume-1"
+                or body.get("workflow_id") != self.workflow["id"] or body.get("policy") != policy):
+            raise StateError("research recovery authorization has a foreign policy owner")
+        return body
+
     def set_experiment_process(self, stage_id, mode):
         """Revise orchestration at a stopped frontier without rewriting scientific inputs."""
         from scisaurus.runtime.run_control import save_control
@@ -1639,6 +1822,9 @@ class ComposerRunner:
         if self.mission_time_ledger is None:
             return
         stage_id = phase.split(":", 1)[0]
+        if stage_id == "research" and self.status == "running":
+            self.mission_time_ledger.switch(self.mission_time_ledger.active_kind or "experiment")
+            return
         stage = next((item for item in self.workflow["stages"] if item["id"] == stage_id), None)
         self.mission_time_ledger.switch(stage["kind"] if self.status == "running" and stage else None)
 
@@ -18306,6 +18492,7 @@ class ComposerRunner:
                 record["specialist_live"] = live
                 record["active_agents"] = self._active_specialist_roles(live)
         active_blockers = self._active_blockers()
+        research_process = self._research_process_policy()
         experiment_process = {item["id"]: policy for item in self.workflow["stages"]
                               if item["kind"] == "experiment"
                               and (policy := self._experiment_process_policy(item)) is not None}
@@ -18343,6 +18530,7 @@ class ComposerRunner:
             "deadline_extensions": deepcopy(self.deadline_extensions),
             "stages": checkpoint_stages, "context": deepcopy(self.context),
             **({"experiment_process": experiment_process} if experiment_process else {}),
+            **({"research_process": research_process} if research_process else {}),
             "feedback": deepcopy(self.feedback),
             "blockers": deepcopy(self.blockers), **blocker_projection,
             "usage": deepcopy(self.usage),
@@ -31377,6 +31565,10 @@ class ComposerRunner:
             self._checkpoint("resume:unbound_topic_refinement", force=True)
 
     def _run_authorized(self):
+        policy = self._research_process_policy()
+        if policy and policy["mode"] == "session_led":
+            from scisaurus.runtime.mission_research import MissionResearchSession
+            return MissionResearchSession(self).run()
         try:
             self._retire_restored_workflow_stops()
             self._reconcile_concept_intake()

@@ -268,6 +268,90 @@ class DevelopmentSession:
     def resume(self):
         return bool(self.state["calls"])
 
+    def reconcile_accounted_unknown(self, config, store, *, checkpoint_ref, policy_ref, receipt_sha256):
+        """Settle a mission researcher transport using its sealed checkpoint charge."""
+        if Path(store.control.dir).resolve() != Path(self.binding["project_id"]).resolve():
+            raise ValidationError("researcher settlement belongs to another project")
+        with (self.root / "owner.lock").open("a+b") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise ValidationError("researcher dispatch is still owned") from exc
+            self.state = json.loads(self.path.read_bytes())
+            config_sha = hashlib.sha256(canonical_bytes(config)).hexdigest()
+            evidence = {}
+            def read(ref):
+                manifest = store.get(ref)
+                raw = store.read_body(manifest["body_hash"])
+                if hashlib.sha256(raw).hexdigest() != manifest["body_hash"]:
+                    raise ValidationError("researcher settlement evidence changed")
+                evidence[ref] = manifest["body_hash"]
+                return manifest, json.loads(raw)
+            checkpoint_manifest, checkpoint = read(checkpoint_ref)
+            policy_manifest, policy = read(policy_ref)
+            active = self.state.get("active_job")
+            if active is None:
+                prior = next((call for call in self.state["calls"] if call["sha256"] == receipt_sha256), None)
+                if prior and self._reconciled_unknown(prior, json.loads(Path(prior["receipt"]).read_bytes())):
+                    return store.get(prior["reconciliation_ref"])
+                raise ValidationError("researcher settlement has no active unknown dispatch")
+            path = Path(active).resolve()
+            raw = path.read_bytes()
+            receipt = json.loads(raw)
+            assignment = json.loads((path.parent / "input/assignment.json").read_bytes())
+            usage = receipt.get("usage", {})
+            namespace = "research-session:" + str(path)
+            if (self.state.get("binding") != self.binding or self.state.get("config_sha256") != config_sha
+                    or hashlib.sha256(raw).hexdigest() != receipt_sha256
+                    or receipt.get("status") != "result_unknown" or receipt.get("outcome_known") is not False
+                    or receipt.get("process_reaped") is not True or receipt.get("job_directory") != str(path.parent)
+                    or receipt.get("session_id") != self.state["session_id"] or receipt.get("config_sha256") != config_sha
+                    or receipt.get("development_session", {}).get("binding") != self.binding
+                    or receipt.get("development_session", {}).get("prior_receipts") != self.state["calls"]
+                    or not path.is_relative_to(Path(self.binding["project_id"])/"research-session/jobs")
+                    or checkpoint_manifest.get("author") != "command.composer"
+                    or not checkpoint_manifest.get("artifact_id", "").startswith("command/composer/checkpoints/")
+                    or checkpoint.get("status") not in {"paused", "blocked"}
+                    or checkpoint.get("stage_usage_totals", {}).get(namespace) != usage
+                    or policy_manifest.get("author") != "command.operator"
+                    or policy_manifest.get("artifact_id") != "command/operator/research-process"
+                    or policy.get("schema_version") != "operator-research-process-1" or policy.get("mode") != "session_led"
+                    or policy.get("development_session") != self.binding or policy.get("session_id") != self.state["session_id"]
+                    or assignment.get("schema_version") != "mission-research-assignment-1"
+                    or assignment.get("workflow_id") != checkpoint.get("workflow_id")
+                    or checkpoint.get("workflow_id") != policy.get("workflow_id")
+                    or assignment.get("research_process", {}).get("body_sha256") != policy_manifest["body_hash"]
+                    or assignment.get("research_process") != checkpoint.get("research_process")
+                    or assignment.get("research_process", {}).get("artifact_ref") != policy_ref
+                    or not {"model_calls", "input_tokens", "output_tokens"}.issubset(usage)
+                    or any(type(amount) is not int or amount < 0 or checkpoint.get("usage", {}).get(key,0) < amount
+                           for key,amount in usage.items())):
+                raise ValidationError("unknown researcher transport lacks exact paid ownership")
+            _verify_receipt_files(path, receipt)
+            try:
+                os.kill(receipt["pid"], 0)
+            except ProcessLookupError:
+                pass
+            else:
+                raise ValidationError("researcher process is still alive")
+            proof = {"schema_version":"development-dispatch-reconciliation-1", "binding":self.binding,
+                "receipt":str(path),"receipt_sha256":receipt_sha256,"session_id":receipt["session_id"],
+                "config_sha256":config_sha,"evidence":evidence,"charged_usage":usage,
+                "disposition":"paid_unknown_history_only"}
+            logical = "command/development-dispatch-reconciliations/"+receipt_sha256
+            record = store.head(logical)
+            if record is None:
+                record = store.publish_artifact(logical_id=logical,artifact_type="note",author="command.recovery",
+                    body=canonical_bytes(proof),media_type="application/json",
+                    inputs=[{"ref":ref,"purpose":"subject"} for ref in evidence])
+            elif store.read_body(record["body_hash"]) != canonical_bytes(proof):
+                raise ValidationError("researcher reconciliation changed its original proof")
+            self.state["calls"].append({"receipt":str(path),"sha256":receipt_sha256,"usage":usage,
+                                       "reconciliation_ref":record["artifact_ref"]})
+            self.state["active_job"] = None
+            self.save()
+            return record
+
     @property
     def read_roots(self):
         return [str(Path(row["receipt"]).parent) for row in self.state["calls"]]
