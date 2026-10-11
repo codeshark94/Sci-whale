@@ -1420,6 +1420,93 @@ class ComposerRunner:
             self._checkpoint_stopped_control("operator:experiment_review")
         return {"artifact_ref": receipt["artifact_ref"], "body_sha256": receipt["body_hash"]}
 
+    def set_experiment_process(self, stage_id, mode):
+        """Revise orchestration at a stopped frontier without rewriting scientific inputs."""
+        from scisaurus.runtime.run_control import save_control
+        self._require_stopped_control()
+        checkpoint, _ = self._stopped_execution_checkpoint()
+        if not isinstance(mode, str) or mode not in {"role_pool", "session_led"}:
+            raise ValidationError("experiment process mode must be role_pool or session_led")
+        stage = next((item for item in self.workflow["stages"]
+                      if item["id"] == stage_id and item["kind"] == "experiment"), None)
+        if stage is None or stage_id not in self.continuation_pending_stage_ids:
+            raise StateError("experiment process revision requires a pending experiment")
+        match = self._topic_context_for_stage(stage, ancestor_ids=self._stage_ancestor_ids(stage))
+        topic = match[1].get("topic") if match else None
+        if not isinstance(topic, dict) or not topic.get("id") or not topic.get("research_question"):
+            raise StateError("experiment process revision requires an admitted question")
+        if mode == "session_led" and (self._software_author_backend_config() is None
+                                       or getattr(self, "laboratory_binding", None) is None):
+            raise StateError("session-led research requires the attested DSH author backend")
+        control = self._read_json_object(self.root / "output/run-control.json") or {}
+        refs = deepcopy(control.get("experiment_process_policy_refs", {}))
+        if not isinstance(refs, dict):
+            raise StateError("experiment process policies must be a stage-to-artifact map")
+        key = f"command/operator/experiment-process/{stage_id}"
+        head = self.store.head(key)
+        if head is not None:
+            _, _, previous = self._read_verified_artifact_json(head["artifact_ref"])
+            if previous.get("mode") == mode:
+                policy = self._experiment_process_policy(stage)
+                return {"artifact_ref": policy["artifact_ref"], "body_sha256": policy["body_sha256"]}
+        record = self._publish(key, "decision_note", {
+            "schema_version": "operator-experiment-process-1", "workflow_id": self.workflow["id"],
+            "stage_id": stage_id, "topic_id": topic["id"], "research_question": topic["research_question"],
+            "mode": mode, "development_session": development_session_binding(self.root),
+            "session_id": (self._read_json_object(self.root / "development-session/session.json") or {}).get("session_id"),
+            "checkpoint_ref": checkpoint["artifact_ref"], "checkpoint_sha256": checkpoint["body_hash"],
+        }, "command.operator", subjects=[checkpoint["artifact_ref"]])
+        refs[stage_id] = record["artifact_ref"]
+        save_control(self.root / "output", {**control, "experiment_process_policy_refs": refs})
+        self._checkpoint_stopped_control("operator:experiment_process")
+        return {"artifact_ref": record["artifact_ref"], "body_sha256": record["body_hash"]}
+
+    def _experiment_process_policy(self, stage):
+        """Resolve the current question-bound operator orchestration revision."""
+        owner = stage.get("_model_budget_owner_stage_id", stage.get("id"))
+        control = self._read_json_object(self.root / "output/run-control.json") or {}
+        refs = control.get("experiment_process_policy_refs", {})
+        if not isinstance(refs, dict):
+            raise StateError("experiment process policies must be a stage-to-artifact map")
+        ref = refs.get(owner)
+        head = self.store.head(f"command/operator/experiment-process/{owner}")
+        if ref is None:
+            if head is not None:
+                raise StateError("experiment process is missing its operator control binding")
+            return None
+        manifest, _, body = self._read_verified_artifact_json(ref)
+        checkpoint, _, prior = self._read_verified_artifact_json(body.get("checkpoint_ref"))
+        original = next((item for item in self.workflow["stages"]
+                         if item["id"] == owner and item["kind"] == "experiment"), None)
+        match = self._topic_context_for_stage(original, ancestor_ids=self._stage_ancestor_ids(original)) if original else None
+        topic = match[1].get("topic", {}) if match else {}
+        if (head is None or head["artifact_ref"] != ref
+                or manifest.get("author") != "command.operator"
+                or body.get("schema_version") != "operator-experiment-process-1"
+                or body.get("workflow_id") != self.workflow["id"] or body.get("stage_id") != owner
+                or body.get("mode") not in {"role_pool", "session_led"}
+                or body.get("topic_id") != topic.get("id")
+                or body.get("research_question") != topic.get("research_question")
+                or body.get("development_session") != development_session_binding(self.root)
+                or (body.get("session_id") is not None and body["session_id"] !=
+                    (self._read_json_object(self.root / "development-session/session.json") or {}).get("session_id"))
+                or checkpoint.get("author") != "command.composer"
+                or checkpoint.get("body_hash") != body.get("checkpoint_sha256")
+                or prior.get("workflow_id") != self.workflow["id"]):
+            raise StateError("experiment process has a foreign checkpoint, question, or session owner")
+        return {"mode": body["mode"], "artifact_ref": ref, "body_sha256": manifest["body_hash"]}
+
+    def _session_led_experiment(self, stage):
+        if not isinstance(stage, dict) or stage.get("kind") != "experiment":
+            return False
+        policy = self._experiment_process_policy(stage)
+        return policy is not None and policy["mode"] == "session_led"
+
+    def _session_led_result_stage(self, stage):
+        """Apply result-review scheduling only to the workflow stage, not evidence services."""
+        return (isinstance(stage, dict) and "_model_budget_owner_stage_id" not in stage
+                and self._session_led_experiment(stage))
+
     def _experiment_review_inputs(self, stage, topic, context):
         """Resolve immutable review requests as hypotheses, never accepted verdicts."""
         inputs = []
@@ -2644,6 +2731,9 @@ class ComposerRunner:
         route = self.departments.stage_route(stage.get("kind", "experiment"))
         department = route["department"]
         appointments = list(route.get("required_roles", []))
+        if self._session_led_experiment(stage):
+            appointments = [item for item in appointments if item.get("id") == "methodologist"]
+            return sum(item["quota"]["max_calls"] for item in appointments)
         verifier = self.departments._resolve_assignment(department, "adversary")
         appointments.append(verifier)
         return sum(
@@ -4856,6 +4946,8 @@ class ComposerRunner:
         resource fences because no downstream model call can be made safely
         while the resource is unavailable.
         """
+        if self._session_led_result_stage(stage):
+            return False
         if self._topic_review_blocks_progression(stage, error):
             return False
         if not self._forward_first() or not isinstance(stage, dict):
@@ -4918,6 +5010,8 @@ class ComposerRunner:
 
     def _authorize_forward_context(self, stage, context, *, reason):
         """Make Composer's handoff explicit without manufacturing evidence."""
+        if self._session_led_result_stage(stage):
+            raise StateError("session-led research requires independent acceptance before forwarding")
         candidate = deepcopy(context) if isinstance(context, dict) else {}
         stage_id = stage["id"]
         prior_status = candidate.get("status")
@@ -5052,6 +5146,8 @@ class ComposerRunner:
                                       specialist_bundle, attempt_history,
                                       *, force_advance=False):
         """Create an honest provisional node so the agenda can keep moving."""
+        if self._session_led_result_stage(stage):
+            return None
         if self._topic_review_blocks_progression(stage, error):
             return None
         if not self._forward_first() and not force_advance:
@@ -11246,6 +11342,10 @@ class ComposerRunner:
             "prior_verifier": ComposerRunner._capability_repair_projection(
                 packet.get("prior_verifier"), max_depth=4, max_keys=20, max_items=8, max_text=1400),
             "decision": context.get("decision"),
+            **({"execution_authority": context["execution_authority"],
+                "independent_validation_required": context.get("independent_validation_required"),
+                "experiment_process": deepcopy(packet.get("experiment_process"))}
+               if context.get("execution_authority") == "session_led_plan" else {}),
             "repair_plan": _preserve_response_value(selected_plan)
             if has_adjudicated_plan else None,
             "repair_plan_sha256": hashlib.sha256(canonical_bytes(
@@ -13525,6 +13625,9 @@ class ComposerRunner:
                 "evidence": "Nonempty evidence links or analytical/source arguments for each directive. Keep unresolved items as limitations and execution checks, never as passed findings.",
             }
         packet["experiment_intent"] = deepcopy(intent)
+        process = self._experiment_process_policy(stage)
+        if process is not None:
+            packet["experiment_process"] = process
         packet["question_alignment"] = research_question_alignment(packet.get("topic"), intent)
         packet["survey_evidence_refs"] = deepcopy(survey_refs)
         packet["prior_measurements"] = deepcopy(prior_measurements)
@@ -14053,6 +14156,17 @@ class ComposerRunner:
         }, packet, reviewer_reports=reviewer_reports, prior_plan_review=panel.get("prior_plan_review"))
         if error is not None or validated is None:
             return False
+        if panel.get("execution_authority") == "session_led_plan":
+            process = packet.get("experiment_process", {})
+            lead = [report for report in reports if isinstance(report, dict)
+                    and report.get("role_id") == "methodologist"]
+            return (process.get("mode") == "session_led"
+                    and isinstance(process.get("artifact_ref"), str)
+                    and isinstance(process.get("body_sha256"), str)
+                    and not reviewer_ids and len(lead) == 1
+                    and lead[0].get("status") == "succeeded"
+                    and panel.get("verifier", {}).get("status") == "not_evaluated"
+                    and panel.get("independent_validation_required") is True)
         verifier = panel.get("verifier")
         blocking = (verifier.get("blocking_findings")
                     if isinstance(verifier, dict) else None)
@@ -14217,6 +14331,8 @@ class ComposerRunner:
         admitted_model = admitted_model if isinstance(admitted_model, dict) else {}
         evidence = {
             "contract_revision": CAPABILITY_REPAIR_REVIEW_EVIDENCE_REVISION,
+            **({"experiment_process": packet["experiment_process"]}
+               if packet.get("experiment_process") else {}),
             **({"external_review_requests": packet["external_review_requests"]}
                if packet.get("external_review_requests") else {}),
             "foundry_execution_evidence": packet.get("foundry_execution_evidence"),
@@ -15173,6 +15289,7 @@ class ComposerRunner:
         """Run upper-model methods roles before a capability redesign."""
         packet = self._build_capability_repair_packet(
             stage, topic_result, prior_context, error)
+        session_led = self._session_led_experiment(stage)
         prior_context = prior_context if isinstance(prior_context, dict) else {}
         retained = prior_context.get("capability_repair_panel")
         cached_review_reports = None
@@ -15494,6 +15611,8 @@ class ComposerRunner:
             role_id for role_id in reviewer_role_ids
             if role_id not in (cached_review_reports or {})
         ]] if cached_review_reports is not None else None)
+        if session_led:
+            active_roles = ["methodologist"]
         assignment = self.departments.begin_stage(
             panel_id, "experiment", attempt_number=assignment_attempt, input_ref=input_ref,
             deadline_seconds=panel_stage["deadline_seconds"], active_role_ids=active_roles,
@@ -15505,7 +15624,9 @@ class ComposerRunner:
                      if item.get("assigned_role") == "methods.methodologist"), None)
         reviewers = [item for item in assignments if item is not lead]
         reviewer_assignment = {**deepcopy(assignment), "assignments": reviewers}
-        if cached_review_reports is not None:
+        if session_led:
+            reviewer_bundle = {"reports": [], "by_role": {}, "usage": {}, "model_enabled": True}
+        elif cached_review_reports is not None:
             retained_reports = []
             reports_by_role = {}
             for role_id in reviewer_role_ids:
@@ -15643,7 +15764,7 @@ class ComposerRunner:
             "prior_plan_review": deepcopy(prior_plan_review),
             "repair_adjudication": deepcopy(chief_result["repair_adjudication"]),
         }
-        verifier = (None if model_failure_report(bundle.get("reports", [])) is not None
+        verifier = (None if session_led or model_failure_report(bundle.get("reports", [])) is not None
                     else self._run_specialist_verifier(
                         panel_stage, assignment, descriptor, bundle, chief_result,
                         stage_result=verification_result))
@@ -15659,8 +15780,10 @@ class ComposerRunner:
                        if failed_reports else None)
         if panel_error is None and lead_report is None:
             panel_error = "methods lead assignment is unavailable"
-        if panel_error is None:
+        if panel_error is None and not session_led:
             panel_error = self._capability_repair_verifier_unavailable_reason(verifier)
+        if panel_error is None and session_led and repair_plan is None:
+            panel_error = plan_validation_error or "session-led repair plan is unavailable"
         if not model_enabled:
             panel_error = "capability repair panel has no configured model route"
         panel_outcome = "blocked" if panel_error else "completed"
@@ -15673,6 +15796,7 @@ class ComposerRunner:
             output_ref=None, usage=panel_usage, error=panel_error,
             actor="command.composer", specialist_results=bundle.get("by_role", {}),
             verifier_result=verifier, failure_scope="stage" if panel_error else None,
+            verifier_deferred=session_led,
         )
         reports = []
         for report in bundle.get("reports", []):
@@ -15698,6 +15822,8 @@ class ComposerRunner:
             })
         panel_decision, open_verifier_concerns = self._capability_repair_verdict(
             repair_plan, verifier)
+        if session_led:
+            panel_decision = "repair" if repair_plan is not None and panel_error is None else "hold"
         verifier_response = verifier.get("response") if isinstance(verifier, dict) else {}
         verifier_response = verifier_response if isinstance(verifier_response, dict) else {}
         diagnostic_hypotheses = (
@@ -15710,6 +15836,8 @@ class ComposerRunner:
         )
         panel = {
             "schema_version": CAPABILITY_REPAIR_PANEL_SCHEMA_VERSION,
+            **({"execution_authority": "session_led_plan", "independent_validation_required": True}
+               if session_led else {}),
             "prompt_revision": CAPABILITY_REPAIR_PANEL_PROMPT_REVISION,
             "status": "unavailable" if panel_error else "completed",
             "decision": "defer" if panel_error else panel_decision,
@@ -15737,7 +15865,7 @@ class ComposerRunner:
             "adjudication_reviewer_role_ids": [report.get("role_id")
                 for report in reviewer_bundle.get("reports", []) if isinstance(report, dict)],
             "verifier": {
-                "status": verifier.get("status") if isinstance(verifier, dict) else None,
+                "status": verifier.get("status") if isinstance(verifier, dict) else "not_evaluated" if session_led else None,
                 "error": (str(verifier.get("error", ""))[:1200]
                           if isinstance(verifier, dict)
                           and verifier.get("status") != "succeeded" else None),
@@ -16052,6 +16180,10 @@ class ComposerRunner:
                     if row["action"]["operation"] == "run" and row["result"].get("runtime")})
                 if runtime_labels:
                     execution_laboratory = execution_laboratory.for_execution(runtime_labels)
+            owner_stage = next((item for item in self.workflow["stages"] if item["id"] == stage_id), None)
+            if self._session_led_experiment(owner_stage) and (configured.get("author_backend") is None
+                                                              or execution_laboratory is None):
+                raise ValidationError("session-led capability authoring requires the attested DSH backend")
             foundry = CapabilityFoundry(
                 model,
                 runtime_python=configured["runtime_python"],
@@ -18174,6 +18306,9 @@ class ComposerRunner:
                 record["specialist_live"] = live
                 record["active_agents"] = self._active_specialist_roles(live)
         active_blockers = self._active_blockers()
+        experiment_process = {item["id"]: policy for item in self.workflow["stages"]
+                              if item["kind"] == "experiment"
+                              and (policy := self._experiment_process_policy(item)) is not None}
         blocker_projection = {
             "active_blockers": active_blockers,
             "blocker_counts": {
@@ -18207,6 +18342,7 @@ class ComposerRunner:
             "department_activity": deepcopy(self.department_activity),
             "deadline_extensions": deepcopy(self.deadline_extensions),
             "stages": checkpoint_stages, "context": deepcopy(self.context),
+            **({"experiment_process": experiment_process} if experiment_process else {}),
             "feedback": deepcopy(self.feedback),
             "blockers": deepcopy(self.blockers), **blocker_projection,
             "usage": deepcopy(self.usage),
@@ -23419,6 +23555,8 @@ class ComposerRunner:
     def _run_specialist_pool(self, stage, stage_assignment, descriptor, *, stage_result=None,
                              cache_input_digest=None):
         """Run the admitted specialist assignments in a bounded provider pool."""
+        if self._session_led_result_stage(stage) and not (stage_result or {}).get("_repair_panel"):
+            return {"reports": [], "by_role": {}, "usage": {}, "model_enabled": True}
         model = self._specialist_model_config(stage, descriptor)
         if model is None or not isinstance(stage_assignment, dict):
             return {"reports": [], "by_role": {}, "usage": {}, "model_enabled": False}
@@ -23430,6 +23568,11 @@ class ComposerRunner:
             assignments = [{**item, "_software_tools": True} if item.get("role_id") == "methodologist"
                            and item.get("_response_contract") in {"repair_evidence", "software_selection"}
                            else item for item in assignments]
+            if self._session_led_experiment(stage):
+                assignments = [{**item, "_requires_development_session": True}
+                    if item.get("role_id") == "methodologist"
+                    and item.get("_response_contract") in {"repair_adjudication", "repair_evidence", "software_selection"}
+                    else item for item in assignments]
         limits = descriptor.get("limits") if isinstance(descriptor, dict) else {}
         max_parallel = limits.get("concurrent_calls") if isinstance(limits, dict) else None
         if type(max_parallel) is not int or max_parallel < 1:
@@ -23694,6 +23837,8 @@ class ComposerRunner:
 
     def _should_run_failure_specialist_review(self, error, stage=None):
         """Review scientific evidence, not transport or missing-input failures."""
+        if self._session_led_experiment(stage):
+            return False
         if self._is_operational_stage_failure(error):
             return False
         if (getattr(error, "capability_repair_panel_completed", False)
@@ -23938,12 +24083,22 @@ class ComposerRunner:
     def _run_specialist_verifier(self, stage, stage_assignment, descriptor, bundle, chief_result,
                                  *, stage_result=None):
         """Run the queued adversary after producer calls and chief output exist."""
+        session_led = self._session_led_result_stage(stage)
+        if session_led and not self._has_executed_experiment_result(
+                stage_result or chief_result, self._stage_experiment_capability_id(stage)):
+            if (stage_result or chief_result).get("status") in STAGE_READY_STATUSES:
+                raise ModelWorkBlocked("session-led research cannot complete without an executed result")
+            return None
         model = self._specialist_model_config(stage, descriptor)
         if model is None or not isinstance(stage_assignment, dict):
+            if session_led:
+                raise ValidationError("executed session-led research requires an independent science verifier")
             return None
         verifier = next((item for item in stage_assignment.get("assignments", [])
                          if isinstance(item, dict) and item.get("assignment_phase") == "verifier"), None)
         if verifier is None:
+            if session_led:
+                raise ValidationError("executed session-led research has no independent science assignment")
             return None
         verifier = deepcopy(verifier)
         deadline = time.monotonic() + self._stage_remaining(stage)
@@ -31396,7 +31551,8 @@ class ComposerRunner:
                 record = self.stage_records.get(stage_id, {})
                 if (not self._can_migrate_forward_candidate(
                         record, self.context.get(stage_id))
-                        or stage is None or stage.get("kind") == "paper"):
+                        or stage is None or stage.get("kind") == "paper"
+                        or self._session_led_result_stage(stage)):
                     continue
                 context = self.context.get(stage_id, {})
                 context = self._authorize_forward_context(
@@ -31425,7 +31581,8 @@ class ComposerRunner:
                     f"resume:{stage_id}:composer_advance_with_findings", force=True)
             for stage_id, record in self.stage_records.items():
                 if (isinstance(record, dict)
-                        and record.get("composer_decision") == "advance_with_findings"):
+                        and record.get("composer_decision") == "advance_with_findings"
+                        and not self._session_led_result_stage(by_id.get(stage_id))):
                     self._mark_forward_blockers_advisory(stage_id)
                     self.continuation_pending_stage_ids.discard(stage_id)
             required_ids = set(self.workflow["completion"]["required_stage_ids"])
@@ -31902,7 +32059,7 @@ class ComposerRunner:
                                     })).hexdigest(),
                                 },
                                 deadline_seconds=self._stage_remaining(attempt_stage),
-                                active_role_ids=[] if self._implementation_reference_stage(stage) else self._active_stage_role_ids(
+                                active_role_ids=[] if self._session_led_experiment(stage) or self._implementation_reference_stage(stage) else self._active_stage_role_ids(
                                     stage, stage_context=self.context.get(stage_id),
                                     descriptor=json.loads(Path(stage["config_path"]).read_text())),
                             )
@@ -32113,7 +32270,8 @@ class ComposerRunner:
                                             context, specialist_verifier)
                                     )
                                     if not carried:
-                                        defer = (self.workflow.get("progression_policy") in {
+                                        defer = (not self._session_led_result_stage(stage)
+                                                 and self.workflow.get("progression_policy") in {
                                                      "full_pass", FORWARD_FIRST_POLICY,
                                                  }
                                                  and stage["kind"] != "paper"
@@ -32168,7 +32326,8 @@ class ComposerRunner:
                             # the verdict attached to the candidate and let
                             # the Composer expose the dependency with an
                             # explicit backfill debt.
-                            if self._should_authorize_forward_hold(outcome, context):
+                            if (not self._session_led_result_stage(stage)
+                                    and self._should_authorize_forward_hold(outcome, context)):
                                 context = self._authorize_forward_context(
                                     stage, context, reason="admitted_stage_review_finding")
                                 outcome = context["status"]
@@ -32210,7 +32369,8 @@ class ComposerRunner:
                                 outcome=outcome, output_ref=context.get("output_path"),
                                 usage=attempt_usage, actor="command.composer",
                                 specialist_results=specialist_bundle.get("by_role", {}),
-                                verifier_result=specialist_verifier)
+                                verifier_result=specialist_verifier,
+                                verifier_deferred=self._session_led_result_stage(stage) and specialist_verifier is None)
                             self.department_activity.append({
                                 "cycle": self.continuation_cycles,
                                 "action": "complete_specialist_pool",

@@ -754,7 +754,7 @@ class DshStructuredProducerClient:
             development_session=development_session)
 
     def task(self, assignment):
-        return (
+        task = (
             "Read the immutable assignment.json and system-contract.txt. Complete the assigned "
             "research or engineering production task in this workspace. Use files, local checks "
             "and revisions to satisfy the exact response contract before finishing. Write the "
@@ -764,6 +764,20 @@ class DshStructuredProducerClient:
             "evidence boundaries. Do not invent observations, citations, successful execution or "
             "scientific validation. The controller validates and admits the deliverable separately. "
             "Your final chat answer is not the deliverable; response.json is.")
+        process = assignment.get("repair_adjudication_packet", {}).get("experiment_process", {})
+        if process.get("mode") == "session_led":
+            task += (
+                " You are the continuing primary researcher for the admitted question. Review its "
+                "theoretical scope and the actual control construction before proposing a repair. "
+                "Use the retained source, frozen input, raw observations, failures and review "
+                "directives. Preserve prior unknown outcomes and paid usage. Select the minimum "
+                "discriminating solver execution, with independent recalculation and science "
+                "review as post-execution acceptance checks. The controller continues code "
+                "authoring in this same development session. Do not select a new topic, expand "
+                "literature collection, or schedule further experiments while this execution "
+                "awaits validation. Your plan authorizes development only; it does not validate "
+                "the experiment or establish a scientific result.")
+        return task
 
     def exchange_for(self, assignment, system):
         return None

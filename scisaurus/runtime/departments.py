@@ -2168,10 +2168,13 @@ class DepartmentRuntime:
 
     def finish_stage(self, stage_id, stage_kind, *, attempt_number=1, outcome,
                      output_ref=None, usage=None, error=None, actor="command.composer",
-                     specialist_results=None, verifier_result=None, failure_scope=None):
+                     specialist_results=None, verifier_result=None, failure_scope=None,
+                     verifier_deferred=False):
         """Close specialist assignments, then publish chief synthesis and an independent verdict."""
         if failure_scope not in {None, "stage"}:
             raise ValidationError(f"unsupported department failure scope: {failure_scope}")
+        if verifier_deferred and verifier_result is not None:
+            raise ValidationError("a deferred verifier cannot carry an executed verdict")
         route = self.stage_route(stage_kind)
         rows = self._assignment_task_rows(stage_id=stage_id, attempt_number=attempt_number)
         if not rows:
@@ -2322,7 +2325,7 @@ class DepartmentRuntime:
                 decision = verifier_response.get("decision") if isinstance(verifier_response, dict) else None
                 verifier_outcome = "accepted" if known_success and decision == "accept" else "hold" if known_success else "failed"
                 verifier_execution = "succeeded"
-        elif failure_scope == "stage" and not known_success:
+        elif verifier_deferred or failure_scope == "stage" and not known_success:
             # A verifier cannot independently assess a chief synthesis that
             # was never produced. Keep the ledger explicit without fabricating
             # a failed adversarial call.
@@ -2335,7 +2338,7 @@ class DepartmentRuntime:
             if verifier_task["state"] in {"queued", "running"}:
                 verifier_task = self.tasks.transition(
                     verifier_task_id, "blocked", actor,
-                    reason="stage failed before verifier dispatch")
+                    reason="verification deferred until execution" if verifier_deferred else "stage failed before verifier dispatch")
         elif verifier_task["state"] == "queued":
             self.tasks.start_attempt(
                 verifier_task_id, verifier_attempt_id, owner=route["verifier_agent"],

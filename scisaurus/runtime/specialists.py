@@ -1745,6 +1745,8 @@ def repair_adjudication_evidence_document(repair_packet, reviewer_reports=(), *,
         },
         "topic": _bounded_value(repair_packet.get("topic", {}), max_depth=3,
                                 max_keys=16, max_items=6, max_text=1000),
+        **({"experiment_process": _preserve_response_value(repair_packet["experiment_process"])}
+           if repair_packet.get("experiment_process") else {}),
         **({key: _preserve_response_value(repair_packet[key])
             for key in ("external_review_requests", "external_review_contract")}
            if repair_packet.get("external_review_requests") else {}),
@@ -2808,6 +2810,7 @@ class SpecialistDispatcher:
         prompt = assignment.pop("_prompt", None) if "_prompt" in assignment else None
         system = specialist_system(assignment, verifier=verifier)
         response_contract = assignment.pop("_response_contract", None)
+        requires_development_session = assignment.pop("_requires_development_session", False)
         if not isinstance(prompt, str):
             prompt = build_specialist_prompt(assignment, packet)
         software_tools = None
@@ -2851,6 +2854,8 @@ class SpecialistDispatcher:
         dsh_producer = (not verifier and (software_tools is not None or response_contract == "repair_adjudication")
                         and self.software_author_backend is not None
                         and self.software_laboratory is not None)
+        if requires_development_session and (not dsh_producer or self.development_session is None):
+            raise ValidationError("session-led primary production requires its attested DSH development session")
         if dsh_producer and enforce_model_cost_limits() and type(quota.get("max_calls")) is int:
             raise ValidationError("DSH cannot enforce an explicit per-model-call allowance without a provider relay")
         producer_client = DshSoftwareProducerClient if software_tools is not None else DshStructuredProducerClient
