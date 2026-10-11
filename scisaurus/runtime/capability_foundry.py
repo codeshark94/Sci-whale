@@ -30,7 +30,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from scisaurus.runtime.measurement_contract import ModelDefinitionError, model_definition_contract, verified_decisions
-from scisaurus.core.errors import ModelContractError, ValidationError
+from scisaurus.core.errors import ModelContractError, NotFoundError, ValidationError
 from scisaurus.runtime.evidence import scientific_input_recovery_contract
 from scisaurus.core.schema import canonical_bytes, json_object as parse_complete_json_object
 from scisaurus.runtime.capability_registry import (
@@ -60,7 +60,7 @@ from scisaurus.runtime.program_gates import (ProgramGateRejected, admit_program_
                                             program_validator_configured_input,
                                             validate_validator_readiness,
                                             validator_readiness_contract)
-from scisaurus.runtime.program_sandbox import run_sandboxed, sandbox_status
+from scisaurus.runtime.program_sandbox import SandboxResult, run_sandboxed, sandbox_status
 from scisaurus.runtime.research_quality import (
     ANALYSIS_FIELDS, AnalysisContractError, analysis_output_contract,
     default_research_quality_contract,
@@ -78,6 +78,39 @@ def _sandbox_status_text(returncode):
     except ValueError:
         signal_name = f"signal {signal_number}"
     return f"{returncode} ({signal_name})"
+
+
+def _retained_executor_preview(store, records, source, payload, runtime_sha256):
+    """Continue validation from exact captured preview bytes; admission still replays."""
+    source_sha256 = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    input_sha256 = hashlib.sha256(payload).hexdigest()
+    for record in reversed(records):
+        if (record.get("operation") != "executor_preview"
+                or record.get("program_sha256") != source_sha256
+                or record.get("stdin_sha256") != input_sha256
+                or record.get("runtime_sha256") != runtime_sha256):
+            continue
+        if (type(record.get("returncode")) is not int or record["returncode"] != 0
+                or record.get("timed_out") is not False
+                or record.get("truncated") is not False
+                or record.get("mode") != "sandbox-exec"):
+            return None
+        bodies = {}
+        for name in ("program", "stdin", "stdout", "stderr"):
+            digest = record.get(name + "_sha256")
+            try:
+                body = store.read_body(digest)
+            except (NotFoundError, OSError, TypeError, ValueError) as exc:
+                raise ModelWorkProvenanceError(
+                    f"retained executor preview {name} object is unavailable") from exc
+            if hashlib.sha256(body).hexdigest() != digest:
+                raise ModelWorkProvenanceError(
+                    f"retained executor preview {name} object differs from its digest")
+            bodies[name] = body
+        if bodies["program"] != source.encode("utf-8") or bodies["stdin"] != payload:
+            raise ModelWorkProvenanceError("retained executor preview changed its source or input")
+        return SandboxResult(0, bodies["stdout"], bodies["stderr"], False, False, "sandbox-exec")
+    return None
 
 
 class SourceDataUnavailable(ValidationError):
@@ -2631,6 +2664,13 @@ class CapabilityFoundry:
             client = ModelClient(**_artifact_generation_config(author_route_configs[0]))
         author_baseline_effort = getattr(client, "reasoning_effort", None)
         runtime = self._runtime()
+        execution_runtime_sha256 = hashlib.sha256(canonical_bytes({
+            "runtime": runtime,
+            "runtime_python": str(self.runtime_python.resolve()),
+            "runtime_python_sha256": hashlib.sha256(self.runtime_python.read_bytes()).hexdigest(),
+            "requirements_sha256": hashlib.sha256(self.requirements_file.read_bytes()).hexdigest(),
+            "laboratory_execution": self._laboratory_execution(),
+        })).hexdigest()
         base_prompt = candidate_prompt(brief, self.runtime_packages, configured_input,
             required_intent=required_intent, runtime_version=runtime["python"])
         if self.laboratory is not None:
@@ -2693,19 +2733,14 @@ class CapabilityFoundry:
                 # A changed contract may reuse failed source as repair input,
                 # never as an accepted result. Exact scientific inputs stay
                 # pinned and the rebuilt candidate runs every current gate.
-                def reusable_prior_candidate(prior):
+                def same_scientific_assignment(prior):
                     requests = prior.get("requests", [])
-                    candidate = (prior.get("outcome", {}).get("candidate")
-                                 if prior.get("status") == "succeeded" else prior.get("last_attempt"))
-                    if (not (requests or prior.get("assignment"))
-                            or not isinstance(candidate, dict) or not PRODUCER_FIELDS.issubset(candidate)):
-                        return None
                     try:
                         original = prior.get("assignment") or json.loads(requests[0]["prompt"])
                     except (IndexError, TypeError, ValueError):
-                        return None
+                        return False
                     if not isinstance(original, dict):
-                        return None
+                        return False
                     original_input = original.get("configured_input", original.get("output_contract", {}).get("test_input"))
                     prior_required = original.get("required_intent_fields") or {}
                     required = base_prompt.get("required_intent_fields") or {}
@@ -2714,13 +2749,24 @@ class CapabilityFoundry:
                             or any(canonical_bytes(required.get(name)) != canonical_bytes(value)
                                    for name, value in prior_required.items())
                             or canonical_bytes(_repair_scientific_input(original_input))
-                            != canonical_bytes(_repair_scientific_input(configured_input))
+                            != canonical_bytes(_repair_scientific_input(configured_input))):
+                        return False
+                    return True
+
+                def reusable_prior_candidate(prior):
+                    requests = prior.get("requests", [])
+                    candidate = (prior.get("outcome", {}).get("candidate")
+                                 if prior.get("status") == "succeeded" else prior.get("last_attempt"))
+                    if (not isinstance(candidate, dict) or not PRODUCER_FIELDS.issubset(candidate)
+                            or not same_scientific_assignment(prior)
                             or not (prior.get("feedback") or prior.get("status") == "succeeded")):
                         return None
                     return requests, candidate
 
                 reusable_prior = []
                 resumable_response = None
+                unresolved_delegated = False
+                empty_profile_recovery = retained_empty_recovery = False
                 if resume_work_ref is None:
                     prior_entries = work_cache.entries()
                 else:
@@ -2734,6 +2780,20 @@ class CapabilityFoundry:
                 for prior in prior_entries:
                     prior = work_cache.recovery_entry(prior)
                     work_cache.inherited_usage(prior)
+                    pending_request = prior.get("requests", [])[-1] if prior.get("requests") else {}
+                    if (self.author_backend is not None and same_scientific_assignment(prior)
+                            and pending_request.get("role", author_role) in {author_role, "methods.validator-author"}
+                            and pending_request.get("status") in {"started", "result_unknown"}):
+                        # Contract changes cannot settle an owned delegated dispatch.
+                        # Reconciliation must precede any new execution or assignment.
+                        resumable_response = deepcopy_config(prior)
+                        resumable_response["usage_inheritance"] = {
+                            "source_ref": prior["cache_ref"],
+                            "source_request_count": len(prior.get("requests", [])),
+                        }
+                        resumable_response.pop("cache_ref", None)
+                        unresolved_delegated = True
+                        break
                     if canonical_bytes(prior.get("assignment")) == canonical_bytes(base_prompt):
                         response = prior.get("last_response")
                         requests = prior.get("requests", [])
@@ -2888,9 +2948,10 @@ class CapabilityFoundry:
                     # route; the current continuation, sandbox, and admission
                     # gates still decide whether any program is usable.
                     state = resumable_response
-                    state.update(status="calling" if state.get("status") == "calling" else
-                                 "blocked" if retained_empty_recovery else
-                                 "repairing" if empty_profile_recovery else "response_received", assignment=base_prompt)
+                    if not unresolved_delegated:
+                        state.update(status="calling" if state.get("status") == "calling" else
+                                     "blocked" if retained_empty_recovery else
+                                     "repairing" if empty_profile_recovery else "response_received", assignment=base_prompt)
                     if not isinstance(state.get("author_request_signatures"), list):
                         state["author_request_signatures"] = []
                 elif reusable_prior:
@@ -3086,6 +3147,7 @@ class CapabilityFoundry:
                 store = work_cache.store
                 record = {
                     "operation": operation,
+                    "runtime_sha256": execution_runtime_sha256,
                     "program_sha256": store.publish_object(source.encode("utf-8"), "text/x-python"),
                     "stdin_sha256": store.publish_object(payload, "application/json"),
                     "stdout_sha256": store.publish_object(result.stdout, "application/octet-stream"),
@@ -4369,6 +4431,12 @@ class CapabilityFoundry:
                 "observation_schema": schema,
                 "candidate_output_exact_shapes": deepcopy_config(base_prompt["executor_output_exact_shapes"]),
                 "raw_observation_sample": deepcopy_config(document["observations"][:3]),
+                "candidate_sha256": hashlib.sha256(canonical_bytes(document)).hexdigest(),
+                "raw_observations": review_observation_table(document["observations"]),
+                "raw_observations_complete": True,
+                "recorded_assets": [{key: asset[key] for key in
+                    ("id", "path", "sha256", "role", "media_type") if key in asset}
+                    for asset in document.get("assets", [])],
                 "contract": base_prompt["independent_validation_contract"],
                 "validator_output_exact_shapes": base_prompt["validator_output_exact_shapes"],
                 "readiness_handshake": validator_readiness_contract(),
@@ -4379,6 +4447,17 @@ class CapabilityFoundry:
                 "runtime": runtime,
                 "permitted_modules": sorted(ALLOWED_IMPORTS),
             }
+            assignment["instructions"] += (
+                " raw_observations is the complete current execution table; the sample only "
+                "illustrates row syntax. Inspect every condition and control, including derived "
+                "quantities outside the primary outcomes, for consistency with the frozen "
+                "definitions. Independently derive units, ranges and control expectations from "
+                "those definitions. Distinguish a reduction of producer scalar rows from an "
+                "independent recomputation from physical fields or masks. State unavailable "
+                "measurement evidence as a limitation and do not claim that a scalar reduction "
+                "validates the underlying field solve. Do not change the design, estimand, "
+                "tolerances or acceptance rules, or demand optimization and final results "
+                "before validating this bounded execution.")
             if self.laboratory is not None:
                 assignment["laboratory_execution"] = {
                     "laboratory": self.laboratory.context(),
@@ -4724,7 +4803,7 @@ class CapabilityFoundry:
                 and last_request.get("status") in {"started", "result_unknown"}):
             from scisaurus.runtime.dsh_batch import DshBatchError
             error = state.get("error") or "DSH batch outcome is unknown; retained jobs require reconciliation before a new dispatch"
-            last_request.update(status="result_unknown", error=error)
+            reconcile_unknown_dispatch(last_request, error)
             state.update(status="blocked", error=error, last_failure_class="operational_recovery",
                          last_failure_gate="delegated_batch")
             save("delegated_batch_unknown_retained")
@@ -5246,7 +5325,14 @@ class CapabilityFoundry:
                                               attempt_value["test_input"])
                 payload = canonical_bytes(payload_value)
                 save("sandbox_execution")
-                first = execute_recorded(executor, payload, "executor_preview")
+                first = (_retained_executor_preview(
+                    work_cache.store, state.get("sandbox_executions", []),
+                    executor, payload, execution_runtime_sha256)
+                    if work_cache is not None else None)
+                if first is None:
+                    first = execute_recorded(executor, payload, "executor_preview")
+                else:
+                    save("executor_preview_restored_for_validation")
                 if first.timed_out and deadline is not None and time.monotonic() >= deadline:
                     raise CapabilityDeadlineError("capability sandbox reached its mission deadline")
                 if first.timed_out or first.truncated or first.returncode != 0:

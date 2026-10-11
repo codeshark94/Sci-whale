@@ -2591,7 +2591,8 @@ class CapabilityFoundryTests(unittest.TestCase):
                 work_cache=self._cache(Path(path)),
                 on_progress=lambda phase, state: progress.append((phase, deepcopy(state))))
             self.assertEqual(outcome["status"], "registered")
-            self.assertEqual((author.calls, reviewer.calls, foundry.validator_client.calls), (2, 2, 1))
+            self.assertEqual((author.calls, reviewer.calls, foundry.validator_client.calls), (2, 2, 2))
+            self.assertEqual(len(progress[-1][1]["validator_authorship"]), 2)
             executions = progress[-1][1]["sandbox_executions"]
             replays = [r for r in executions if r["operation"] == "executor_replay"]
             self.assertEqual(len(replays), 6)
