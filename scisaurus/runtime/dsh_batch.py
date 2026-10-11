@@ -160,11 +160,12 @@ class DshBatchRunner:
     """One fresh session per work order, with controller-owned receipts."""
 
     def __init__(self, config, *, root, runtime_read_roots=(), laboratory=None,
-                 development_session=None):
+                 development_session=None, isolated_from=()):
         self.config = validate_batch_config(config)
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.runtime_read_roots = [str(Path(p).resolve()) for p in runtime_read_roots]
+        self.isolated_from = tuple(str(Path(p).resolve()) for p in isolated_from)
         self.laboratory = laboratory
         from scisaurus.runtime.development_session import DevelopmentSession
         self.development_session = (DevelopmentSession(development_session)
@@ -303,7 +304,7 @@ class DshBatchRunner:
                              *surface.get("read_only_paths", ())],
             # Durable attachment storage fsyncs each ancestor directory entry.
             # Exact directory handles do not admit file contents below them.
-            directory_sync_paths=work.parents)
+            directory_sync_paths=work.parents, isolated_from=self.isolated_from, admitted_root=job)
         # DSH supervises detached shell groups. It must be able to inspect
         # processes and signal members of its own inherited Seatbelt domain.
         profile += "\n(allow process-info*)\n(allow signal (target same-sandbox))\n"
@@ -743,7 +744,7 @@ class DshStructuredProducerClient:
 
     deliverable_label = "structured producer"
 
-    def __init__(self, config, *, root, runtime_python, development_session=None):
+    def __init__(self, config, *, root, runtime_python, development_session=None, isolated_from=()):
         self.config = validate_batch_config(config)
         self.model = config["model"]
         self.timeout_seconds = config["timeout_seconds"]
@@ -751,7 +752,7 @@ class DshStructuredProducerClient:
         self.runtime_python = str(Path(runtime_python).absolute())
         self.runner = DshBatchRunner(config, root=root,
             runtime_read_roots=[str(Path(runtime_python).absolute().parent.parent)],
-            development_session=development_session)
+            development_session=development_session, isolated_from=isolated_from)
 
     def task(self, assignment):
         task = (
@@ -903,7 +904,7 @@ class DshSoftwareProducerClient(DshStructuredProducerClient):
 class DshValidatorClient:
     """A fresh blinded engineering session for the separately authored validator."""
 
-    def __init__(self, config, *, root, runtime_python, laboratory=None):
+    def __init__(self, config, *, root, runtime_python, laboratory=None, isolated_from=()):
         self.config = validate_batch_config(config)
         self.model = config["model"]
         self.timeout_seconds = config["timeout_seconds"]
@@ -912,7 +913,8 @@ class DshValidatorClient:
         self.laboratory = laboratory
         self.runtime_python = str(Path(runtime_python).absolute())
         self.runner = DshBatchRunner(config, root=root,
-            runtime_read_roots=[str(Path(runtime_python).absolute().parent.parent)], laboratory=laboratory)
+            runtime_read_roots=[str(Path(runtime_python).absolute().parent.parent)], laboratory=laboratory,
+            isolated_from=isolated_from)
 
     def complete(self, *, system, prompt):
         assignment = json.loads(prompt)

@@ -68,6 +68,21 @@ def output_document():
 
 
 class SandboxTests(unittest.TestCase):
+    def test_independent_job_grants_exclude_producer_and_loader_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            producer = Path(tmp)/'producer'
+            job = producer/'independent/job'
+            work = job/'work'; work.mkdir(parents=True)
+            frozen = job/'input'; frozen.mkdir()
+            history = producer/'history.json'; history.write_text('{}')
+            options = {'read_only_paths':[str(frozen)], 'isolated_from':[producer], 'admitted_root':job}
+            with patch('scisaurus.runtime.program_sandbox._macho_dependency_paths', return_value=set()):
+                profile = sandbox_profile(work, [sys.executable], **options)
+                self.assertIn(str(frozen.resolve()), profile)
+            with patch('scisaurus.runtime.program_sandbox._macho_dependency_paths', return_value={history}):
+                with self.assertRaisesRegex(ValidationError, 'read file exposes the producer project'):
+                    sandbox_profile(work, [sys.executable], **options)
+
     def test_spawn_manager_uses_private_short_temporary_namespace(self):
         with tempfile.TemporaryDirectory() as path:
             workspace = Path(path) / ('nested-' + 'x' * 110)

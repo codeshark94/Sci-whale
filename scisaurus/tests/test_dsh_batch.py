@@ -48,6 +48,22 @@ for line in sys.stdin:
 
 
 class BatchTests(unittest.TestCase):
+    def test_independent_dispatch_rejects_laboratory_grant_before_process_launch(self):
+        from unittest.mock import Mock
+        config = self.config()
+        runtime_root = self.root/'runtime-files'; runtime_root.mkdir()
+        config['read_roots'] = [str(runtime_root)]
+        protected = self.root/'producer'; protected.mkdir()
+        lab = Mock(); lab.execution_surface.return_value = {'environment':{}, 'read_only_paths':[str(protected)]}
+        runner = DshBatchRunner(config, root=self.root/'independent-jobs', laboratory=lab,
+                                isolated_from=[protected])
+        with patch('scisaurus.runtime.dsh_batch.SANDBOX_EXEC', '/bin/true'), \
+             patch('scisaurus.runtime.dsh_batch.start_process', side_effect=AssertionError('independent leak dispatched')) as start, \
+             patch('scisaurus.runtime.program_sandbox._macho_dependency_paths', return_value=set()):
+            with self.assertRaisesRegex(DshBatchError, 'exposes the producer project'):
+                runner.run('fixture', inputs={'assignment.json':b'{}'}, outputs=['response.json'])
+            start.assert_not_called()
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)

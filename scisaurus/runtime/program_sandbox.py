@@ -218,10 +218,8 @@ def _sandbox_read_paths(command, workspace):
     return sorted(str(path) for path in roots if path.exists()), sorted(str(path) for path in files)
 
 
-def sandbox_profile(workspace, command, *, allow_network=False, read_only_paths=(), temporary_workspace=None,
-                    directory_sync_paths=()):
-    """Return a deny-by-default Seatbelt profile for one throwaway workspace."""
-    workspace = str(Path(workspace).resolve())
+def sandbox_read_grants(workspace, command, *, read_only_paths=(), temporary_workspace=None):
+    """Compute the actual recursive and literal read grants for a process."""
     read_roots, read_files = _sandbox_read_paths(command, workspace)
     if temporary_workspace is not None:
         temporary_workspace = Path(temporary_workspace)
@@ -234,6 +232,35 @@ def sandbox_profile(workspace, command, *, allow_network=False, read_only_paths=
         if not path.is_absolute() or not path.is_dir():
             raise ValidationError("sandbox dependency read roots must be existing absolute directories")
         read_roots.append(str(path.resolve()))
+    return read_roots, read_files
+
+
+def require_isolated_read_grants(read_roots, read_files, *, isolated_from, admitted_root):
+    admitted = Path(admitted_root).resolve()
+    for value in isolated_from:
+        protected = Path(value).resolve()
+        for value in read_roots:
+            path = Path(value).resolve()
+            if path.is_relative_to(admitted):
+                continue
+            if path.is_relative_to(protected) or protected.is_relative_to(path):
+                raise ValidationError("independent backend read root exposes the producer project: " + str(path))
+        for value in read_files:
+            path = Path(value).resolve()
+            if path.is_relative_to(protected) and not path.is_relative_to(admitted):
+                raise ValidationError("independent backend read file exposes the producer project: " + str(path))
+
+
+def sandbox_profile(workspace, command, *, allow_network=False, read_only_paths=(), temporary_workspace=None,
+                    directory_sync_paths=(), isolated_from=(), admitted_root=None):
+    """Return a deny-by-default Seatbelt profile for one throwaway workspace."""
+    workspace = str(Path(workspace).resolve())
+    read_roots, read_files = sandbox_read_grants(workspace, command,
+        read_only_paths=read_only_paths, temporary_workspace=temporary_workspace)
+    if temporary_workspace is not None:
+        temporary_workspace = str(Path(temporary_workspace).resolve())
+    require_isolated_read_grants(read_roots, read_files, isolated_from=isolated_from,
+                                admitted_root=admitted_root or workspace)
     metadata_paths = set()
     for value in [*read_roots, *read_files]:
         path = Path(value)

@@ -65,6 +65,18 @@ arithmetic reduction cannot complete the mission. A valid null may be accepted.
 The original required workflow outputs and outstanding work orders remain gates.
 Accepted completion preserves the previous stage context in an immutable artifact;
 release approval follows the original workflow policy.
+Reopening a completed checkpoint rechecks its current result files, ownership,
+required outputs and exact retained independent audit before returning completion.
+It does not dispatch another researcher or final auditor. Changed evidence or a
+missing matching audit holds the checkpoint rather than replaying a stale verdict.
+Fresh and cached final audits bind their immutable receipt hash, input assignment,
+controller contract, output verdict, backend, usage and artifact owner. Independent
+dispatch checks the same effective read grants used by the sandbox, including
+command virtual environments, absolute file arguments, loader dependencies,
+interpreter roots and laboratory dependencies. Those grants cannot expose the
+producer project; the isolated job's own frozen inputs and workspace remain
+accessible. Evidence custody errors stop the primary exchange rather than
+requesting another scientific author turn.
 
 Tool and final-audit unknown outcomes remain sealed, including their original paid
 usage. `reconcile_research_operation(ref, recovery_ref)` requires the current exact
@@ -91,3 +103,24 @@ use at most the remaining slots. All dispatches retain finite watchdogs and the
 original mission time policy. Registration, offline tests and controller contract
 consumption are distinct from live primary/solver/validator consumption and from
 scientific completion.
+
+## Offline flow verification
+
+`scisaurus.tests.test_mission_research_flow` connects the real structured client,
+tool/final exchange, persistent session lease, mission controller, receipt-backed
+result files, read-only result store, final audit gate and durable completion.
+Provider dispatch, scientific admission and experiment execution are replaced at
+their service boundaries. Network sockets, subprocess launch, general model
+completion, alternate author completion and the legacy stage path are forbidden.
+Fixtures use temporary projects and synthetic observations; their acceptance
+verdicts prove control flow only. Other required workflow stages are pre-completed
+in the fixtures, and history-catalog and repair-packet hydration are replaced.
+The connected tests do not verify those stages' scientific outputs or a live
+provider's restoration of the retained session history.
+
+The scenarios cover external recovery admission, known rejection feedback, final
+HOLD feedback, unknown evaluation/final audit, changed raw data, finite dispatch
+interruption, cold continuation with the same session and completed checkpoint
+reopening without new usage. Live recovery, installed solver behavior, independent
+physical recalculation and the actual scientific conclusion require fresh runtime
+evidence after account capacity is externally confirmed.

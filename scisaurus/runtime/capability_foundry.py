@@ -2451,7 +2451,8 @@ class CapabilityFoundry:
             if self.validator_client is None:
                 self.validator_client = DshValidatorClient(self.author_backend,
                     root=self.workspace_root / "dsh-validator-jobs", runtime_python=self.runtime_python,
-                    laboratory=self.laboratory)
+                    laboratory=self.laboratory,
+                    isolated_from=[self.development_session["project_id"]] if self.development_session else ())
         if type(max_attempts) is not int or not 1 <= max_attempts <= 12:
             raise ValidationError("foundry max_attempts must be an integer between 1 and 12")
         if (type(timeout_seconds) not in (int, float)

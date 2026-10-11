@@ -241,6 +241,7 @@ class MissionResearchSession:
         model = json.loads(Path(config["model_config_path"]).read_text())
         if config.get("author_backend") is None or c.laboratory_binding is None:
             raise StateError("research tools require the current attested backend and laboratory")
+        self._require_independent_backend(config)
         foundry = CapabilityFoundry(model, runtime_python=config["runtime_python"], workspace_root=config["workspace_root"],
             registry_root=config["registry_root"], repo_root=config["repo_root"], requirements_file=config["requirements_file"],
             runtime_packages=[(p["name"],p["version"]) for p in config["runtime_packages"]],
@@ -470,7 +471,8 @@ class MissionResearchSession:
         import sqlite3
         from types import SimpleNamespace
         from scisaurus.core.store import ArtifactStore
-        with sqlite3.connect((project/"state/control.sqlite").as_uri()+"?mode=ro",uri=True) as connection:
+        from contextlib import closing
+        with closing(sqlite3.connect((project/"state/control.sqlite").as_uri()+"?mode=ro",uri=True)) as connection:
             connection.row_factory = sqlite3.Row
             store = ArtifactStore(SimpleNamespace(dir=str(project),_conn=connection))
             retained = store.get(result["incumbent_ref"])
@@ -485,7 +487,7 @@ class MissionResearchSession:
             raise StateError("result question differs from its frozen input")
         return body,package,json.loads(raw)
 
-    def propose_final(self, final):
+    def propose_final(self, final, *, allow_dispatch=True):
         self.guard()
         self.composer._require_settled_research_operations()
         if (not isinstance(final,dict) or set(final)!={"result_ref","summary","limitations"}
@@ -527,15 +529,18 @@ class MissionResearchSession:
         if audit and audit.get("status")=="reconciled":
             audit = None
         if audit is None:
+            if not allow_dispatch:
+                raise StateError("completed research checkpoint has no matching independent final audit")
             config = c._software_author_backend_config()
             if config is None:
                 raise StateError("independent final audit backend is unavailable")
+            self._require_independent_backend(config)
             dispatch_root = self.root/"independent-final"/digest(assignment)/uuid.uuid4().hex
             self._publish(logical,{"policy":self.policy,"assignment":assignment,"status":"started",
                           "dispatch_root":str(dispatch_root)},
                           subjects=[final["result_ref"]])
             client = DshStructuredProducerClient(config["author_backend"],root=dispatch_root,
-                                                 runtime_python=config["runtime_python"])
+                                                 runtime_python=config["runtime_python"],isolated_from=[c.root])
             client.deadline = self.deadline
             try:
                 result = client.complete(system="Independent read-only scientific result audit.",prompt=json.dumps(assignment))
@@ -548,7 +553,9 @@ class MissionResearchSession:
             self._charge("final-audit:"+result.response_metadata["receipt"],result.usage)
             verdict = result.json_object()
             audit = {"policy":self.policy,"assignment":assignment,"verdict":verdict,
-                     "dispatch_root":str(dispatch_root),"receipt":result.response_metadata["receipt"],"usage":result.usage}
+                     "dispatch_root":str(dispatch_root),"receipt":result.response_metadata["receipt"],
+                     "receipt_sha256":hashlib.sha256(Path(result.response_metadata["receipt"]).read_bytes()).hexdigest(),
+                     "usage":result.usage}
             record = self._publish(logical,audit,subjects=[final["result_ref"]])
         else:
             record = c.store.head(logical)
@@ -556,6 +563,7 @@ class MissionResearchSession:
                 raise StateError("final review belongs to different current evidence")
             if audit.get("status") in {"started","result_unknown"}:
                 raise ModelWorkBlocked("final audit has an owned unknown dispatch requiring official reconciliation")
+        self._verify_final_audit(record, audit, assignment)
         verdict = audit["verdict"]
         if (set(verdict)!={"decision","original_question_resolved","evidence_sha256","rationale","limitations"}
                 or type(verdict["original_question_resolved"]) is not bool
@@ -570,6 +578,45 @@ class MissionResearchSession:
         self.final = {**deepcopy(final),"stage_id":body["stage_id"],"result":body["result"],
                       "independent_final_ref":record["artifact_ref"],"independent_verdict":verdict}
         return None
+
+    def _verify_final_audit(self, record, audit, assignment):
+        from scisaurus.runtime.dsh_batch import read_completed_structured_producer
+        if (record.get("author") != "command.research-session"
+                or not record.get("artifact_id", "").startswith("command/research-session/final-reviews/")):
+            raise StateError("independent final audit has a foreign artifact owner")
+        backend = self.composer._software_author_backend_config()
+        if backend is not None:
+            self._require_independent_backend(backend)
+        try:
+            path = Path(audit["receipt"])
+            root = Path(audit["dispatch_root"]).resolve()
+            family = (self.root/"independent-final"/digest(assignment)).resolve()
+            if (backend is None or not root.is_relative_to(family)
+                    or path.name != "receipt.json" or not path.resolve().is_relative_to(root)
+                    or hashlib.sha256(path.read_bytes()).hexdigest() != audit.get("receipt_sha256")):
+                raise StateError("independent final audit lost its sealed dispatch receipt")
+            receipt, captured, system, verdict = read_completed_structured_producer(
+                path.parent, config_sha256=digest(backend["author_backend"]))
+            if (Path(receipt.get("job_directory", "")).resolve() != path.parent.resolve()
+                    or "development_session" in receipt
+                    or captured.pop("runtime_python",None) != str(Path(backend["runtime_python"]).absolute())
+                    or captured != assignment or verdict != audit["verdict"]
+                    or receipt["usage"] != audit["usage"]
+                    or system != "Independent read-only scientific result audit."):
+                raise StateError("independent final audit differs from its isolated input, output or accounting")
+        except (OSError, ValueError, KeyError, TypeError, ValidationError) as error:
+            raise StateError("independent final audit has incomplete or changed receipt evidence") from error
+
+    def _require_independent_backend(self, backend):
+        from scisaurus.runtime.program_sandbox import sandbox_read_grants, require_isolated_read_grants
+        job = self.root/"independent-preflight"
+        roots = [*backend["author_backend"].get("read_roots", []),
+                 str(Path(backend["runtime_python"]).absolute().parent.parent)]
+        try:
+            grants, files = sandbox_read_grants(job/"work", backend["author_backend"]["command"], read_only_paths=roots)
+            require_isolated_read_grants(grants, files, isolated_from=[self.composer.root], admitted_root=job)
+        except ValidationError as error:
+            raise StateError(str(error)) from error
 
     def _bind_tools(self):
         from scisaurus.runtime.software_history import engineering_history
@@ -602,12 +649,35 @@ class MissionResearchSession:
             if path.is_relative_to(self.root/"jobs") and path.is_file():
                 self._charge(str(path),json.loads(path.read_bytes()).get("usage",{}))
 
+    def _restore_completed(self):
+        c = self.composer
+        ref = self.state.get("final_ref")
+        if not ref or c.active_research_requests or c.continuation_pending_stage_ids:
+            return False
+        manifest, _, final = c._read_verified_artifact_json(ref)
+        stage_id = final.get("stage_id")
+        head = c.store.head("command/research-session/final")
+        if (manifest.get("author") != "command.research-session" or not head
+                or head["artifact_ref"] != ref
+                or c.context.get(stage_id, {}).get("research_session_final_ref") != ref
+                or c.stage_records.get(stage_id, {}).get("research_session_final_ref") != ref
+                or c.stage_records.get(stage_id, {}).get("status") != "completed"):
+            raise StateError("completed research checkpoint has a foreign final result owner")
+        self.propose_final({key:final[key] for key in ("result_ref","summary","limitations")}, allow_dispatch=False)
+        if self.final != final:
+            raise StateError("completed research checkpoint differs from its current independently audited result")
+        c.status = "completed"
+        self.save("final_restored")
+        return True
+
     def run(self):
         c = self.composer
         try:
             self.guard()
             c._require_settled_research_frontier()
             c._require_settled_research_operations()
+            if self._restore_completed():
+                return c._finish()
             configured = c._software_author_backend_config()
             if configured is None:raise StateError("mission researcher backend is unavailable")
             self.deadline = time.monotonic()+min(c._remaining(),configured["author_backend"]["timeout_seconds"])
@@ -632,9 +702,9 @@ class MissionResearchSession:
                 try:
                     if set(response)!={"final"}:raise ValidationError("research response requires exactly one tool action or final proposal")
                     self.propose_final(response["final"])
-                except (DshBatchError,ProviderRateLimitError):
+                except (DshBatchError,ProviderRateLimitError,StateError):
                     raise
-                except (ValidationError,ModelWorkBlocked,StateError) as error:
+                except (ValidationError,ModelWorkBlocked) as error:
                     self.guard()
                     c._require_settled_research_operations()
                     return {**assignment,"final_feedback":{"error":str(error),"scientific_completion":False}}

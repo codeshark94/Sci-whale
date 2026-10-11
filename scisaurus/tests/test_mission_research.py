@@ -2,6 +2,7 @@
 from copy import deepcopy
 import hashlib
 import json
+import sys
 from pathlib import Path
 import tempfile
 import time
@@ -17,6 +18,27 @@ from scisaurus.runtime.mission_research import MissionResearchSession, Researche
 from scisaurus.runtime.model_work import ModelWorkBlocked, ModelWorkCache
 from scisaurus.runtime.models import ModelResult
 from scisaurus.tests import test_experiment_review_handoff as fixtures
+
+
+def write_final_audit_receipt(root, assignment, backend, verdict, usage):
+    from scisaurus.runtime.dsh_batch import DshStructuredProducerClient
+    root = Path(root)/'fixture-job'
+    inputs = {'assignment.json': canonical_bytes({**assignment,'runtime_python':backend['runtime_python']}),
+              'system-contract.txt': b'Independent read-only scientific result audit.'}
+    outputs = {'response.json': canonical_bytes(verdict)}
+    for directory, files in (('input',inputs),('outputs',outputs)):
+        (root/directory).mkdir(parents=True)
+        for name, body in files.items():
+            (root/directory/name).write_bytes(body)
+    receipt = {'schema_version':'dsh-batch-receipt-1','status':'completed','process_reaped':True,
+        'model':backend['author_backend'].get('model','offline'),
+        'job_directory':str(root),'output_directory':'outputs',
+        'config_sha256':hashlib.sha256(canonical_bytes(backend['author_backend'])).hexdigest(),
+        'task_sha256':hashlib.sha256(DshStructuredProducerClient.task(None,json.loads(inputs['assignment.json'])).encode()).hexdigest(),
+        'input_sha256':{k:hashlib.sha256(v).hexdigest() for k,v in inputs.items()},
+        'outputs':{k:hashlib.sha256(v).hexdigest() for k,v in outputs.items()},'usage':usage}
+    path=root/'receipt.json';path.write_bytes(canonical_bytes(receipt))
+    return str(path)
 
 
 class MissionResearchTests(unittest.TestCase):
@@ -381,7 +403,7 @@ class MissionResearchTests(unittest.TestCase):
                 with self.assertRaisesRegex(StateError,'reconciliation'):c._require_settled_research_operations()
                 raise RuntimeError('interrupted independent dispatch')
             with patch.object(s,'_validated_result',return_value=(body,{'question':fixtures.QUESTION},{})), \
-                 patch.object(c,'_software_author_backend_config',return_value={'author_backend':{},'runtime_python':'/offline'}), \
+                 patch.object(c,'_software_author_backend_config',return_value={'author_backend':{'command':[sys.executable]},'runtime_python':sys.executable}), \
                  patch('scisaurus.runtime.mission_research.DshStructuredProducerClient') as client:
                 client.return_value.complete.side_effect=interrupted
                 with self.assertRaisesRegex(RuntimeError,'interrupted'):
@@ -488,7 +510,10 @@ class MissionResearchTests(unittest.TestCase):
                         verdict={'decision':'accepted' if accepted else 'hold','original_question_resolved':accepted,
                             'evidence_sha256':assignment['evidence_sha256'],'rationale':'Declared comparison has current evidence.' if accepted else 'The pilot does not resolve the original question.',
                             'limitations':['Declared physical model only.']}
-                        return ModelResult(json.dumps(verdict),'independent',{'model_calls':1,'input_tokens':35},0,'stop',response_metadata={'receipt':'offline-independent'})
+                        usage={'model_calls':1,'input_tokens':35,'output_tokens':10}
+                        backend={'author_backend':{'timeout_seconds':120,'command':[sys.executable]},'runtime_python':sys.executable}
+                        receipt=write_final_audit_receipt(self.assert_boundary['root'],assignment,backend,verdict,usage)
+                        return ModelResult(json.dumps(verdict),'independent',usage,0,'stop',response_metadata={'receipt':receipt})
                 class Primary:
                     def __init__(self,*args,**kwargs):self.options=kwargs
                     def complete(self,*,system,prompt):
@@ -500,7 +525,7 @@ class MissionResearchTests(unittest.TestCase):
                         else:
                             if not feedback or not feedback.get('final_feedback'):raise AssertionError('limited result incorrectly completed')
                         return ModelResult(json.dumps({'final':final}),'primary',{'model_calls':2,'input_tokens':80},0,'stop',response_metadata={'receipt':'None'})
-                with patch.object(c,'_software_author_backend_config',return_value={'author_backend':{'timeout_seconds':120},'runtime_python':'/offline/python'}), \
+                with patch.object(c,'_software_author_backend_config',return_value={'author_backend':{'timeout_seconds':120,'command':[sys.executable]},'runtime_python':sys.executable}), \
                      patch.object(s,'_bind_tools'),patch.object(s,'assignment',return_value={'checkpoint':{},'scientific_software_tools':s.tools()}), \
                      patch.object(s,'_validated_result',return_value=(body,{'question':fixtures.QUESTION}, {'observations':[{'measured':1}]})), \
                      patch('scisaurus.runtime.mission_research.MissionResearchClient',Primary), \
