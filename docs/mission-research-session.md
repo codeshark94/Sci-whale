@@ -15,6 +15,9 @@ policy bound to the workflow, original question, checkpoint and existing session
 It preserves the workflow, historical stage contexts, scientific inputs, receipts
 and cumulative usage. The experiment-only policy remains available for workflows
 that use the stage scheduler; the mission policy takes precedence over it.
+Legacy producer, repair-panel, specialist-dispatch and stage-review entry points
+reject execution under the mission policy, including direct API calls outside the
+workflow router. Independent admission remains accessible through researcher tools.
 
 Registration cannot execute research. `authorize_research_resume(evidence)` is a
 separate stopped control operation requiring an externally observed recovery
@@ -49,6 +52,8 @@ producer development handle or history. A pending or unknown evaluation retains
 its candidate and observations and blocks further execution or literature
 expansion. An identical rejected request returns its retained feedback. Runtime
 and result ownership are rechecked before successful evidence reuse.
+Dependency bindings may update the retained literature gate, but cannot replace
+the admitted executor, validator, input or scientific intent.
 
 ## Acceptance and recovery
 
@@ -72,6 +77,14 @@ old execution projects, or changes an unknown receipt to scientific success.
 transport only against its exact sealed paid checkpoint and original session
 binding. Its immutable receipt and unknown scientific outcome stay in history;
 accounting settlement does not authorize provider calls or adopt partial output.
+Final audits are sealed as started before dispatch. Any unsettled tool or audit
+head blocks new primary dispatches, computations and changed final proposals;
+changing the requested operation or claims cannot bypass that hold.
+Each audit attempt has a separate dispatch root. Its recovery proof also requires
+`receipt_sha256`; the actual receipt must bind that root, backend and frozen input,
+with complete nonnegative usage and a reaped, inactive process. Recorded usage is
+checkpointed before the hold is released. Missing receipt or usage is unknown,
+never evidence of zero cost.
 
 The primary reserves one host model slot; nested independent experiment services
 use at most the remaining slots. All dispatches retain finite watchdogs and the

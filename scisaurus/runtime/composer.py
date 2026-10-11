@@ -1541,6 +1541,20 @@ class ComposerRunner:
             if requests and requests[-1].get("status") in {"started", "result_unknown"}:
                 raise StateError("paid unknown foundry dispatch requires official reconciliation before research resume")
 
+    def _require_stage_graph_execution(self):
+        """Keep legacy producer entry points outside a persistent mission owner."""
+        policy = self._research_process_policy()
+        if policy is not None and policy["mode"] == "session_led":
+            raise StateError("mission research is owned by its original session; stage-graph execution is disabled")
+
+    def _require_settled_research_operations(self):
+        """A new primary turn cannot bypass an unknown tool or final audit."""
+        for namespace in ("command/research-session/tools", "command/research-session/final-reviews"):
+            for entry in ModelWorkCache(self.store, self._publish, namespace=namespace).entries():
+                if entry.get("status") in {"started", "result_unknown"}:
+                    raise StateError("research operation requires official reconciliation before another primary dispatch: "
+                                     + entry["cache_ref"])
+
     def reconcile_research_operation(self, ref, recovery_ref):
         """Release an accounted tool hold using its exact official recovery proof."""
         self._require_stopped_control()
@@ -1556,12 +1570,26 @@ class ComposerRunner:
                 or proof_manifest.get("author") != "command.recovery"
                 or proof.get("schema_version") != "research-operation-reconciliation-1"
                 or proof.get("operation_ref") != ref or proof.get("operation_sha256") != manifest["body_hash"]
-                or proof.get("disposition") != "paid_unknown_history_only"
-                or proof.get("usage") != body.get("observation", body).get("usage", {})
-                or proof.get("receipt") != body.get("observation", body).get("receipt")):
+                or proof.get("disposition") != "paid_unknown_history_only"):
             raise StateError("research tool recovery requires its exact accounted unknown operation proof")
+        evidence = body.get("observation", body)
+        is_final_audit = manifest["artifact_id"].startswith("command/research-session/final-reviews/")
+        if is_final_audit:
+            from scisaurus.runtime.mission_research import final_audit_recovery_evidence, MissionResearchSession
+            evidence = final_audit_recovery_evidence(self,body,proof)
+            if (body.get("receipt") not in (None,evidence["receipt"])
+                    or ("usage" in body and body["usage"]!=evidence["usage"])):
+                raise StateError("final audit recovery differs from its retained paid receipt")
+        if (not isinstance(evidence.get("receipt"),str) or not evidence["receipt"].strip()
+                or not isinstance(evidence.get("usage"),dict)
+                or proof.get("usage")!=evidence["usage"] or proof.get("receipt")!=evidence["receipt"]):
+            raise StateError("research recovery cannot substitute missing receipt or usage with zero")
+        if is_final_audit:
+            MissionResearchSession(self)._charge("final-audit:"+evidence["receipt"],evidence["usage"])
+            self._checkpoint_stopped_control("operator:research_audit_accounted")
         record = self._publish(manifest["artifact_id"], "decision_note", {
             **body, "status": "reconciled", "prior_unknown_ref": ref, "recovery_ref": recovery_ref,
+            **({"reconciled_dispatch":evidence} if is_final_audit else {}),
         }, "command.research-session", subjects=[ref, recovery_ref])
         head = self.store.head("command/research-session/state")
         if head:
@@ -9514,6 +9542,7 @@ class ComposerRunner:
 
     def revalidate_stage_review(self, stage_id):
         """Re-review paid production, refreshing only changed exact peer projections."""
+        self._require_stage_graph_execution()
         stage = next((item for item in self.workflow["stages"] if item["id"] == stage_id), None)
         if stage is None or stage.get("kind") not in {"topic_discovery", "survey"}:
             raise StateError("review revalidation requires a stage with replayable production")
@@ -14689,6 +14718,7 @@ class ComposerRunner:
 
     def _run_capability_repair_evidence(self, stage, descriptor, packet, retained, prior_review):
         """Produce and independently review an immutable Methods evidence dependency."""
+        self._require_stage_graph_execution()
         lead = next((item for item in retained.get("reports", [])
                      if isinstance(item, dict) and item.get("role_id") == "methodologist"), None)
         if not isinstance(lead, dict) or lead.get("decision") != "hold":
@@ -15122,6 +15152,7 @@ class ComposerRunner:
 
     def _assess_scientific_software(self, stage, descriptor, topic_result, *, computation_scope=None):
         """Admit software fitness and executed upstream computations before authoring."""
+        self._require_stage_graph_execution()
         from scisaurus.runtime.software_workbench import (
             REVISION, SELECTION_CONTRACT_REVISION, SoftwareWorkbench, selection_contract,
             software_computation_identity, software_assessment_prompt, validate_selection,
@@ -15473,6 +15504,7 @@ class ComposerRunner:
     def _run_capability_repair_panel(self, stage, descriptor, topic_result,
                                      prior_context, error):
         """Run upper-model methods roles before a capability redesign."""
+        self._require_stage_graph_execution()
         packet = self._build_capability_repair_packet(
             stage, topic_result, prior_context, error)
         session_led = self._session_led_experiment(stage)
@@ -16181,6 +16213,7 @@ class ComposerRunner:
         already a new immutable capability and can be selected before another
         authoring call burns the same scope.
         """
+        self._require_stage_graph_execution()
         configured_path = self.workflow.get("capability_foundry_config_path")
         if not configured_path:
             return result
@@ -23635,6 +23668,7 @@ class ComposerRunner:
 
     def _dispatch_specialist_work(self, dispatcher, assignments, packet, *, verifier=False):
         """Persist each completed role before another role can fail or time out."""
+        self._require_stage_graph_execution()
         cache = ModelWorkCache(self.store, self._publish)
         pending, reports, keys = [], [], {}
 
@@ -24501,6 +24535,7 @@ class ComposerRunner:
     def _run_stage(self, stage, *, attempt_number=1, specialist_reports=None,
                    stage_assignment=None):
         """Reuse completed production when only an outer reviewer failed."""
+        self._require_stage_graph_execution()
         if isinstance(stage.get("_completed_experiment_handoff_ref"), str):
             return self._reuse_completed_experiment_handoff(stage)
         descriptor = json.loads(Path(stage["config_path"]).read_text())
@@ -26963,6 +26998,7 @@ class ComposerRunner:
     def _produce_stage(self, stage, *, attempt_number=1, specialist_reports=None,
                        stage_assignment=None):
         """Dispatch one allowlisted specialist runner and return its context."""
+        self._require_stage_graph_execution()
         kind = stage["kind"]
         foundry_usage_before = deepcopy(self.foundry_usage) if kind == "experiment" else {}
         foundry_usage_delta = {}
