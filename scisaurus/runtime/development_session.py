@@ -298,7 +298,8 @@ class DevelopmentSession:
             path = Path(active).resolve()
             raw = path.read_bytes()
             receipt = json.loads(raw)
-            assignment = json.loads((path.parent / "input/assignment.json").read_bytes())
+            assignment_raw = (path.parent / "input/assignment.json").read_bytes()
+            assignment = json.loads(assignment_raw)
             usage = receipt.get("usage", {})
             namespace = "research-session:" + str(path)
             if (self.state.get("binding") != self.binding or self.state.get("config_sha256") != config_sha
@@ -318,6 +319,7 @@ class DevelopmentSession:
                     or policy.get("schema_version") != "operator-research-process-1" or policy.get("mode") != "session_led"
                     or policy.get("development_session") != self.binding or policy.get("session_id") != self.state["session_id"]
                     or assignment.get("schema_version") != "mission-research-assignment-1"
+                    or receipt.get("input_sha256", {}).get("assignment.json") != hashlib.sha256(assignment_raw).hexdigest()
                     or assignment.get("workflow_id") != checkpoint.get("workflow_id")
                     or checkpoint.get("workflow_id") != policy.get("workflow_id")
                     or assignment.get("research_process", {}).get("body_sha256") != policy_manifest["body_hash"]

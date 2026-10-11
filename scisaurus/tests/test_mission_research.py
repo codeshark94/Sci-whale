@@ -184,6 +184,11 @@ class MissionResearchTests(unittest.TestCase):
             s._charge(str(path),usage);c._checkpoint_stopped_control('offline:paid_transport')
             checkpoint=c.store.head(f'command/composer/checkpoints/{len(c.feedback)+len(c.stage_records)+1}')
             arguments={'checkpoint_ref':checkpoint['artifact_ref'],'policy_ref':s.policy['artifact_ref'],'receipt_sha256':receipt_sha}
+            unbound=deepcopy(receipt);unbound['input_sha256']={};path.write_bytes(canonical_bytes(unbound))
+            with self.assertRaisesRegex(ValidationError,'paid ownership'):
+                development.reconcile_accounted_unknown(config,c.store,**{
+                    **arguments,'receipt_sha256':hashlib.sha256(path.read_bytes()).hexdigest()})
+            path.write_bytes(original)
             with patch('scisaurus.runtime.development_session.os.kill',return_value=None):
                 with self.assertRaisesRegex(ValidationError,'still alive'):
                     development.reconcile_accounted_unknown(config,c.store,**arguments)
