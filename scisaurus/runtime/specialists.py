@@ -435,6 +435,7 @@ def _safe_value(value, *, depth=0):
                 continue
             if str(key) in {"candidate_program", "prior_plan_review", "repair_evidence_request",
                             "repair_evidence_note", "repair_adjudication", "repair_contract",
+                            "external_review_requests", "external_review_contract", "external_review_dispositions",
                             "prior_evidence_review", "evidence_experiment_intent", "foundry_execution_evidence", "executed_study_evidence",
                             "question_alignment", "admitted_model_definition", "evidence_plan", "study_evidence_contract", "completed_producer_evidence",
                             "topic", "candidate_topics", "frontier_seeds", "experiment_feasibility", "stage_evidence_scope"}:
@@ -483,6 +484,7 @@ def _bounded_value(value, *, depth=0, max_depth=5, max_keys=64, max_items=24,
         for key, item in value.items():
             if str(key) in {"candidate_program", "prior_plan_review", "repair_evidence_request",
                             "repair_evidence_note", "repair_adjudication", "repair_contract",
+                            "external_review_requests", "external_review_contract", "external_review_dispositions",
                             "prior_evidence_review", "evidence_experiment_intent", "foundry_execution_evidence", "executed_study_evidence",
                             "question_alignment", "admitted_model_definition", "evidence_plan", "study_evidence_contract", "completed_producer_evidence",
                             "topic", "candidate_topics", "frontier_seeds", "experiment_feasibility", "stage_evidence_scope"}:
@@ -827,6 +829,9 @@ def _verifier_repair_packet(value, *, detail="full"):
     output["question_alignment"] = _preserve_response_value(value.get("question_alignment", {}))
     output["foundry_execution_evidence"] = _preserve_response_value(value.get("foundry_execution_evidence", {}))
     output["executed_study_evidence"] = _preserve_response_value(value.get("executed_study_evidence", {}))
+    if value.get("external_review_requests"):
+        output["external_review_requests"] = _preserve_response_value(value["external_review_requests"])
+        output["external_review_contract"] = _preserve_response_value(value["external_review_contract"])
     output["failure_lineage"] = _bounded_value(
         value.get("failure_lineage", {}), max_depth=2,
         max_keys=12, max_items=8, max_text=400)
@@ -1573,6 +1578,9 @@ def build_specialist_prompt(assignment, stage_packet):
         if isinstance(repair_packet, dict):
             projected["capability_repair_packet"] = _bounded_value(
                 repair_packet, max_depth=6, max_keys=48, max_items=16, max_text=2600)
+            if repair_packet.get("external_review_requests"):
+                for field in ("external_review_requests", "external_review_contract"):
+                    projected["capability_repair_packet"][field] = _preserve_response_value(repair_packet[field])
     envelope = {
         "assignment": {
             "assigned_role": assignment.get("assigned_role"),
@@ -1737,6 +1745,9 @@ def repair_adjudication_evidence_document(repair_packet, reviewer_reports=(), *,
         },
         "topic": _bounded_value(repair_packet.get("topic", {}), max_depth=3,
                                 max_keys=16, max_items=6, max_text=1000),
+        **({key: _preserve_response_value(repair_packet[key])
+            for key in ("external_review_requests", "external_review_contract")}
+           if repair_packet.get("external_review_requests") else {}),
         **({"laboratory": _preserve_response_value(repair_packet["laboratory"])}
            if isinstance(repair_packet.get("laboratory"), dict) else {}),
         "repair_contract": _preserve_response_value(repair_packet.get("repair_contract", {})),
@@ -1849,6 +1860,13 @@ def build_repair_adjudication_prompt(assignment, repair_packet, reviewer_reports
                 },
             },
         }
+    if repair_packet.get("external_review_requests"):
+        envelope["decision_contract"]["rules"].append(repair_packet["external_review_contract"]["instruction"])
+        envelope["decision_contract"]["output_schema"]["repair_plan"]["external_review_dispositions"] = [{
+            "review_ref": "exact external review artifact_ref", "id": "exact directive id",
+            "disposition": "confirmed | refuted | unresolved",
+            "evidence": ["analytical/source argument or evidence link for this directive"],
+        }]
     alignment = repair_packet.get("question_alignment", {})
     if alignment.get("original", {}).get("research_question"):
         envelope["decision_contract"]["output_schema"]["repair_plan"].update({

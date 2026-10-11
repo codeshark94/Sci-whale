@@ -1346,8 +1346,8 @@ class ComposerRunner:
                 os.environ.pop(key, None)
         self._runtime_environment_after = None
 
-    def _checkpoint_stopped_control(self, phase):
-        """An operator revision records a paused frontier until explicit resume."""
+    def _require_stopped_control(self):
+        """Require an explicitly stopped owner before changing control inputs."""
         if not self.control_only:
             raise StateError("operator checkpoint requires control-only access")
         control = self._read_json_object(self.root / "output/run-control.json") or {}
@@ -1360,8 +1360,90 @@ class ComposerRunner:
                 pass
             else:
                 raise StateError("operator checkpoint cannot replace a live supervisor")
+
+    def _checkpoint_stopped_control(self, phase):
+        """An operator revision records a paused frontier until explicit resume."""
+        self._require_stopped_control()
         self.status = "paused"
         self._checkpoint(phase, force=True)
+
+    @staticmethod
+    def _validate_experiment_review(review, question):
+        if (not isinstance(review, dict)
+                or set(review) != {"research_question", "directives", "evidence"}
+                or review["research_question"] != question
+                or not isinstance(review["evidence"], dict)):
+            raise ValidationError("experiment review must preserve its question and supply evidence")
+        directives = review["directives"]
+        if (not isinstance(directives, list) or not directives
+                or any(not isinstance(item, dict) or set(item) != {"id", "text"}
+                       or any(not isinstance(item[key], str) or not item[key].strip()
+                              for key in ("id", "text")) for item in directives)
+                or len({item["id"] for item in directives}) != len(directives)):
+            raise ValidationError("experiment review requires unique nonempty review directives")
+
+    def attach_experiment_review(self, stage_id, review):
+        """Queue question-bound review evidence without executing or changing science."""
+        self._require_stopped_control()
+        checkpoint, _ = self._stopped_execution_checkpoint()
+        stage = next((item for item in self.workflow["stages"]
+                      if item["id"] == stage_id and item["kind"] == "experiment"), None)
+        if stage is None or stage_id not in self.continuation_pending_stage_ids:
+            raise StateError("experiment review requires a pending experiment stage")
+        match = self._topic_context_for_stage(stage, ancestor_ids=self._stage_ancestor_ids(stage))
+        topic = match[1].get("topic") if match else None
+        if (not isinstance(topic, dict) or not isinstance(topic.get("research_question"), str)
+                or not isinstance(topic.get("id"), str) or not topic["id"].strip()):
+            raise StateError("experiment review requires an admitted research question")
+        self._validate_experiment_review(review, topic["research_question"])
+        key = f"command/operator/experiment-reviews/{stage_id}/" + hashlib.sha256(
+            canonical_bytes({"topic_id": topic["id"], "review": review})).hexdigest()
+        receipt = self.store.head(key)
+        if receipt is None:
+            receipt = self._publish(key, "decision_note", {
+                "schema_version": "operator-experiment-review-1",
+                "workflow_id": self.workflow["id"], "stage_id": stage_id,
+                "topic_id": topic["id"], "review": deepcopy(review),
+                "checkpoint_ref": checkpoint["artifact_ref"],
+                "checkpoint_sha256": checkpoint["body_hash"],
+            }, "command.operator", subjects=[checkpoint["artifact_ref"]])
+        bound = self._experiment_review_inputs(stage, topic, {
+            "operator_experiment_review_refs": [receipt["artifact_ref"]]})[0]
+        if bound["review"] != review:
+            raise StateError("experiment review receipt differs from its content identity")
+        context = self.context.setdefault(stage_id, {})
+        refs = context.setdefault("operator_experiment_review_refs", [])
+        if not isinstance(refs, list):
+            raise StateError("experiment review references must be an ordered artifact list")
+        if receipt["artifact_ref"] not in refs:
+            refs.append(receipt["artifact_ref"])
+            self._checkpoint_stopped_control("operator:experiment_review")
+        return {"artifact_ref": receipt["artifact_ref"], "body_sha256": receipt["body_hash"]}
+
+    def _experiment_review_inputs(self, stage, topic, context):
+        """Resolve immutable review requests as hypotheses, never accepted verdicts."""
+        inputs = []
+        refs = context.get("operator_experiment_review_refs", [])
+        if not isinstance(refs, list) or any(not isinstance(ref, str) for ref in refs):
+            raise StateError("experiment review references must be an ordered artifact list")
+        for ref in refs:
+            artifact, _, body = self._read_verified_artifact_json(ref)
+            review = body.get("review", {})
+            if (artifact.get("author") != "command.operator"
+                    or body.get("schema_version") != "operator-experiment-review-1"
+                    or body.get("workflow_id") != self.workflow["id"]
+                    or body.get("stage_id") != stage["id"]
+                    or body.get("topic_id") != topic.get("id")
+                    or not isinstance(review, dict)
+                    or review.get("research_question") != topic.get("research_question")):
+                raise StateError("experiment review has a foreign owner, stage, or question")
+            try:
+                self._validate_experiment_review(review, topic.get("research_question"))
+            except ValidationError as exc:
+                raise StateError(f"experiment review receipt has invalid review evidence: {exc}") from exc
+            inputs.append({"artifact_ref": ref, "body_sha256": artifact["body_hash"],
+                           "review": deepcopy(review), "authority": "unadjudicated_review_evidence"})
+        return inputs
 
     def set_mission_time_policy(self, policy):
         """Append an operator execution-control revision at a stopped frontier."""
@@ -10941,7 +11023,8 @@ class ComposerRunner:
         if isinstance(value, dict):
             output = {}
             for index, (key, item) in enumerate(value.items()):
-                if str(key) in {"foundry_execution_evidence", "current_foundry_failure", "admitted_model_definition", "executed_study_evidence"}:
+                if str(key) in {"foundry_execution_evidence", "current_foundry_failure", "admitted_model_definition", "executed_study_evidence",
+                                "external_review_requests", "external_review_contract", "external_review_dispositions"}:
                     output[str(key)] = _preserve_response_value(item)
                     continue
                 if index >= max_keys:
@@ -11105,6 +11188,8 @@ class ComposerRunner:
 
         return {
             "schema_version": context.get("schema_version") or "capability-repair-panel-1",
+            **({"external_review_requests": deepcopy(packet["external_review_requests"])}
+               if packet.get("external_review_requests") else {}),
             "input_sha256": context.get("input_sha256") or packet.get("input_sha256"),
             "review_input_sha256": context.get("review_input_sha256"),
             "evidence_priority": (
@@ -13429,6 +13514,16 @@ class ComposerRunner:
         ) if name in source}
             for source in unresolved_attempt_sources if isinstance(source, dict)]
         packet["foundry_execution_evidence"] = deepcopy((verified_dossier or {}).get("foundry_execution_evidence", {}))
+        reviews = self._experiment_review_inputs(stage, selected, prior_context)
+        if reviews:
+            packet["external_review_requests"] = reviews
+            packet["external_review_contract"] = {
+                "instruction": "Before proposing replacement code or an execution, independently adjudicate every supplied review directive against its cited evidence and the current source/input. These are review hypotheses, not accepted scientific verdicts. Preserve the admitted question and historical results; do not pivot topics or force a positive outcome. Plan acceptance is not experiment completion.",
+                "repair_plan_field": "external_review_dispositions",
+                "entry_fields": ["review_ref", "id", "disposition", "evidence"],
+                "dispositions": ["confirmed", "refuted", "unresolved"],
+                "evidence": "Nonempty evidence links or analytical/source arguments for each directive. Keep unresolved items as limitations and execution checks, never as passed findings.",
+            }
         packet["experiment_intent"] = deepcopy(intent)
         packet["question_alignment"] = research_question_alignment(packet.get("topic"), intent)
         packet["survey_evidence_refs"] = deepcopy(survey_refs)
@@ -13563,6 +13658,22 @@ class ComposerRunner:
             return None, "the methods lead did not issue a repair decision"
         if not isinstance(plan, dict):
             return None, "the methods lead did not provide a substantive repair plan"
+        directive_ids = {(entry["artifact_ref"], item["id"]) for entry in packet.get("external_review_requests", [])
+                         for item in entry["review"]["directives"]}
+        dispositions = plan.get("external_review_dispositions", [])
+        if directive_ids:
+            if (not isinstance(dispositions, list)
+                    or any(not isinstance(item, dict) or set(item) != {"review_ref", "id", "disposition", "evidence"}
+                           or not isinstance(item.get("id"), str)
+                           or not isinstance(item.get("review_ref"), str)
+                           or not isinstance(item.get("disposition"), str)
+                           or item.get("disposition") not in {"confirmed", "refuted", "unresolved"}
+                           or not isinstance(item.get("evidence"), list) or not item["evidence"]
+                           or any(not isinstance(link, str) or not link.strip() for link in item["evidence"])
+                           for item in dispositions)
+                    or len(dispositions) != len(directive_ids)
+                    or {(item["review_ref"], item["id"]) for item in dispositions} != directive_ids):
+                return None, "the Methods plan has not adjudicated every external review directive"
         expected_lineage = packet.get("failure_lineage")
         expected_lineage = expected_lineage if isinstance(expected_lineage, dict) else {}
         required_lineage = (
@@ -13678,6 +13789,7 @@ class ComposerRunner:
             # must not veto an otherwise evidence-bound experimental design.
             "dissent_resolution": [],
             "residual_uncertainties": deepcopy(uncertainties),
+            **({"external_review_dispositions": deepcopy(dispositions)} if directive_ids else {}),
             **alignment_fields,
         }, None
 
@@ -14105,6 +14217,8 @@ class ComposerRunner:
         admitted_model = admitted_model if isinstance(admitted_model, dict) else {}
         evidence = {
             "contract_revision": CAPABILITY_REPAIR_REVIEW_EVIDENCE_REVISION,
+            **({"external_review_requests": packet["external_review_requests"]}
+               if packet.get("external_review_requests") else {}),
             "foundry_execution_evidence": packet.get("foundry_execution_evidence"),
             "executed_study_evidence": packet.get("executed_study_evidence"),
             "admitted_model_definition": {key: admitted_model.get(key) for key in (
@@ -16221,6 +16335,8 @@ class ComposerRunner:
         generated = topic_context.get("generated_capability")
         continuation_requests = self._requests_for_stage(stage)
         prior_experiment = self.context.get(stage["id"])
+        external_review_required = bool(self._experiment_review_inputs(
+            stage, selected, prior_experiment or {}))
         methods_response_repair = self._format_recovery_requires_methods_panel(
             stage, continuation_requests, prior_experiment)
         expected_capability_id = (
@@ -16273,7 +16389,7 @@ class ComposerRunner:
             and any(item.get("kind") in EXPERIMENT_WORK_ORDER_KINDS
                     for item in continuation_requests)
                     and has_observed_experiment
-        ) or fresh_pre_execution_repair or methods_response_repair
+        ) or fresh_pre_execution_repair or methods_response_repair or external_review_required
         if needs_fresh_capability and not self.workflow.get("capability_foundry_config_path"):
             raise ValidationError(
                 "a substantive experiment continuation requires capability_foundry_config_path; "
@@ -16283,6 +16399,7 @@ class ComposerRunner:
                                  or methods_response_repair)
         if self._reference_implementation_authoring(stage, has_observed_experiment=has_observed_experiment):
             repair_panel_required = False
+        repair_panel_required = repair_panel_required or external_review_required
         if needs_fresh_capability and repair_panel_required:
             available = self._foundry_model_call_budget(stage, repair_panel_usage={})
             if available is not None and available < 1:
@@ -16336,7 +16453,7 @@ class ComposerRunner:
                     fenced.repair_subject = deepcopy(reviewed_packet.get(
                         "repair_subject_lineage", reviewed_packet.get("failure_lineage")))
                 raise fenced
-            if (repair_context.get("schema_version") in CAPABILITY_REPAIR_PLAN_SCHEMA_VERSIONS
+            if ((external_review_required or repair_context.get("schema_version") in CAPABILITY_REPAIR_PLAN_SCHEMA_VERSIONS)
                     and not self._capability_repair_plan_admitted(repair_context)):
                 reason = repair_context.get("plan_validation_error")
                 if not reason:
@@ -17566,7 +17683,7 @@ class ComposerRunner:
             for candidate in candidates:
                 candidate_manifest, _, candidate_body = self._read_verified_artifact_json(candidate["artifact_ref"])
                 if (candidate_manifest.get("author") == "command.composer"
-                        and candidate_body.get("status") == "running"
+                        and candidate_body.get("status") in STAGE_READY_STATUSES | STAGE_HOLD_STATUSES | {"running", "paused", "blocked"}
                         and candidate_body.get("state_revision") == restored["state_revision"]
                         and self._interrupted_checkpoint_identity(candidate_body) == restored.get("execution_sha256")):
                     matches.append((candidate_manifest, candidate_body))
