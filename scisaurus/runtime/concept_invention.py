@@ -125,9 +125,12 @@ def validate_concepts(value, request, exclusions):
             or not isinstance(value['imagined_capabilities'], list) or not isinstance(value['concepts'], list)
             or (value['decision'] == 'propose') != bool(value['concepts'])):
         raise ValidationError('concept design differs from its capability-first contract')
-    def text_fields(item, prototype):
+    def text_fields(item, prototype, path):
         if not isinstance(item, dict) or set(item) != set(prototype):
-            raise ValidationError('concept design lost required structural fields')
+            if not isinstance(item, dict):
+                raise ValidationError(path + ' requires an object')
+            raise ValidationError(path + ' fields mismatch: missing ' + str(sorted(set(prototype)-set(item)))
+                                  + '; extra ' + str(sorted(set(item)-set(prototype))))
         for name, example in prototype.items():
             if isinstance(example, str) and (not isinstance(item[name], str) or not item[name].strip()):
                 raise ValidationError('concept design requires literal ' + name)
@@ -137,28 +140,30 @@ def validate_concepts(value, request, exclusions):
     capabilities = {}
     forbidden = {' '.join(row['function'].casefold().split()) for row in request['held_catalog']}
     forbidden.update(' '.join(row['research_question'].casefold().split()) for row in exclusions)
-    for capability in value['imagined_capabilities']:
-        text_fields(capability, contract['imagined_capabilities'][0])
+    for index, capability in enumerate(value['imagined_capabilities']):
+        text_fields(capability, contract['imagined_capabilities'][0], 'concept_design.imagined_capabilities['+str(index)+']')
         if (capability['id'] in capabilities or capability['id'] in request['held_candidate_ids']
                 or ' '.join(capability['new_ability'].casefold().split()) in forbidden):
             raise ValidationError('imagined capability repeats a held identity or function')
         capabilities[capability['id']] = capability
     ids = []
     prototype = contract['concepts'][0]
-    for concept in value['concepts']:
-        text_fields(concept, prototype)
+    for index, concept in enumerate(value['concepts']):
+        path='concept_design.concepts['+str(index)+']'
+        text_fields(concept, prototype, path)
         if (concept['capability_id'] not in capabilities or concept['id'] in request['held_candidate_ids']
                 or concept['novelty_status'] != 'unverified' or concept['evidence_status'] != 'concept_only'):
             raise ValidationError('concept design changed its ownership or claimed admission')
         for field in ['working_principle', 'structure', 'physics_sanity', 'possibility_test']:
-            text_fields(concept[field], prototype[field])
+            text_fields(concept[field], prototype[field], path+'.'+field)
         string_list(concept['working_principle']['causal_chain'], 3)
         string_list(concept['structure']['state_sequence'], 2)
         components = concept['structure']['components']
         if not isinstance(components, list) or not components:
             raise ValidationError('concept structure requires actual components')
-        for component in components:
-            text_fields(component, prototype['structure']['components'][0])
+        for component_index, component in enumerate(components):
+            text_fields(component, prototype['structure']['components'][0],
+                        path+'.structure.components['+str(component_index)+']')
         separation = concept['held_candidate_separation']
         if (not isinstance(separation, dict) or set(separation) != set(request['held_candidate_keys'])
                 or not all(isinstance(x, str) and x.strip() for x in separation.values())):

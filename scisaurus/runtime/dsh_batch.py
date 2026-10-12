@@ -176,6 +176,7 @@ class DshBatchRunner:
             raise ValidationError("DSH startup marker must be a nonempty string")
         self.required_startup_marker = required_startup_marker
         self.forbid_reasoning = forbid_reasoning
+        self.task_contract = None
         self.laboratory = laboratory
         from scisaurus.runtime.development_session import DevelopmentSession
         self.development_session = (DevelopmentSession(development_session)
@@ -308,9 +309,22 @@ class DshBatchRunner:
                config["auth_env"]: credential}
         surface = (self.laboratory.execution_surface(work) if self.laboratory else {})
         env.update(surface.get("environment", {}))
+        contract_path = None
+        if self.task_contract is not None:
+            contract_path = job / 'task-contract.json'
+            manifest = {'workspace': str(work), 'output': str(work / 'response.json'),
+                'assignment': str(frozen / 'assignment.json'),
+                'inputs': {str(frozen / name): identity for name, identity in bound.items()},
+                'first_input': str(frozen / 'unread-input.txt') if 'unread-input.txt' in bound else None}
+            contract_path.write_bytes(canonical_bytes(manifest))
+            contract_path.chmod(0o444)
+            state['task_contract'] = {'path': str(contract_path), 'sha256': sha256(contract_path)}
+            save()
+            env['SCISAURUS_TASK_CONTRACT'] = str(contract_path)
         profile = sandbox_profile(work, config["command"], allow_network=True,
             read_only_paths=[str(frozen), *config["read_roots"], *self.runtime_read_roots,
                              *(development.read_roots if development is not None else []),
+                             *([str(contract_path)] if contract_path is not None else []),
                              *surface.get("read_only_paths", ())],
             # Durable attachment storage fsyncs each ancestor directory entry.
             # Exact directory handles do not admit file contents below them.

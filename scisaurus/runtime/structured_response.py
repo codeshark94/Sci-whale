@@ -8,7 +8,7 @@ from scisaurus.runtime.fresh_intake import sha
 OUTPUT_RULES = [
     'Construct and update the parsed JSON object using structural keys and array positions from output_contract. Serialize and write the complete response.json document; repeated field names or values are valid at different structural paths.',
     'Do not use substring edit operations on a structured JSON deliverable. Read an existing document before replacing it, preserve meaningful authored content in the permitted fields, and use the native write tool for complete publication.',
-    'Any local contract check must assert all required conditions and exit nonzero on failure. Printing missing or extra fields while exiting zero is not a passed check. A failed check or tool ends the attempt; no automatic repair step or retry.'
+    'Read every current input through native read before workspace work. Use the authoritative validate_response tool after complete-document publication; do not author a substitute checker or extend allowed fields. A failed check or tool ends the attempt; no automatic repair step or retry.'
 ]
 
 

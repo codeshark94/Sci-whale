@@ -111,6 +111,32 @@ def tool_contract():
     }
 
 
+READONLY_OPTIONAL_FIELDS = {
+    'read_receipt': {'start','max_chars'}, 'read_evidence': {'start','max_chars'},
+    'fetch_source': {'start','max_chars','capture_ref'}, 'search': {'page'}, 'inspect': {'revision'},
+}
+
+
+def validate_readonly_action(action):
+    """Validate the declared noncomputing action shape before any dispatch or publication."""
+    _fields(action, {'operation','arguments'})
+    operation=action['operation'];args=action['arguments']
+    prototypes=tool_contract()['actions']
+    if not isinstance(operation,str) or operation not in prototypes or operation in {'acquire','run'}:
+        raise ValidationError('unsupported readonly software operation')
+    prototype=prototypes[operation];optional=READONLY_OPTIONAL_FIELDS.get(operation,set())
+    _fields(args,set(prototype)-optional,optional)
+    for name,value in args.items():
+        example=prototype[name]
+        if isinstance(example,str) and (not isinstance(value,str) or not value.strip()):
+            raise ValidationError('software action requires nonempty '+name)
+        if type(example) is int and (type(value) is not int or value<0 or name in {'page','max_chars'} and value==0):
+            raise ValidationError('software action requires a valid integer '+name)
+        if isinstance(example,list) and (not isinstance(value,list) or not value
+                or any(not isinstance(x,str) or not x.strip() for x in value)):
+            raise ValidationError('software action requires a nonempty literal list '+name)
+
+
 def _sha(value):
     return hashlib.sha256(value).hexdigest()
 
@@ -685,6 +711,8 @@ class SoftwareWorkbench:
         _fields(action, {"operation", "arguments"})
         if not isinstance(action["operation"], str) or not isinstance(action["arguments"], dict):
             raise ValidationError("software action requires an operation name and argument object")
+        if action['operation'] not in {'acquire','run'}:
+            validate_readonly_action(action)
         identity = {"revision": REVISION, "action": action}
         if action["operation"] == "read_receipt":
             if action["arguments"].get("receipt_ref") not in self.history_refs:

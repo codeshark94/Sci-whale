@@ -112,7 +112,8 @@ class ConceptInventionTests(unittest.TestCase):
         review_tests.events_for(job, receipt, skip=('assignment.json',2) if missing else None)
         response = {'tool_action':{}} if wrong else {'concept_design':self.value(request)}
         result = SimpleNamespace(response_metadata={'receipt':str(rpath)},usage=self.owner.usage,json_object=lambda:response)
-        with patch('scisaurus.runtime.fresh_intake.preflight',return_value=args), \
+        with patch('scisaurus.runtime.intake_guard.verify_publication',return_value={'offline_transport_fixture':True}), \
+             patch('scisaurus.runtime.fresh_intake.preflight',return_value=args), \
              patch('scisaurus.runtime.fresh_intake.IntakePrimaryClient') as client, \
              patch('scisaurus.runtime.fresh_intake.SoftwareWorkbench',side_effect=AssertionError('no scientific tool dispatch')):
             client.return_value.complete.return_value = result

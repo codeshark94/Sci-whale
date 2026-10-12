@@ -21,6 +21,12 @@ FAILURE_POLICY_READY = "SCISAURUS_TOOL_FAILURE_POLICY_READY:cancel-owning-agent-
 
 
 class IntakePrimaryClient(DshStructuredProducerClient):
+    def __init__(self, *args, **kwargs):
+        from scisaurus.runtime.intake_guard import guarded_backend, GUARD_READY
+        kwargs['required_startup_marker'] = GUARD_READY
+        super().__init__(*args, **kwargs)
+        self.runner.task_contract = guarded_backend(self.config)
+
     def input_files(self, assignment, system):
         from scisaurus.runtime.structured_response import OUTPUT_RULES
         assignment=deepcopy(assignment)
@@ -46,7 +52,16 @@ class IntakePrimaryClient(DshStructuredProducerClient):
 
     def task(self, assignment):
         task=self._task(assignment)
-        return task + (' Structured output policy: construct/update the parsed JSON object using '
+        return ('Your first operations must use native read to finish every current input file, '
+            'including held-candidates.json when present. Continue exactly after any truncation. '
+            'Before all input lines are displayed, no bash, workspace read, write or validation '
+            'operation is permitted. After input delivery, read the existing output if needed, '
+            'response.json is absent at dispatch start; preserved draft content is in immutable inputs. '
+            'construct your response and use native write for the whole response.json. '
+            'The authoritative checker rejects publication before write on any exact contract '
+            'mismatch. Then call validate_response with no arguments and stop. Do not create '
+            'your own checker, run bash, stage files, delegate or retry. ' + task +
+            ' Structured output policy: construct/update the parsed JSON object using '
             'structural paths, then serialize and publish the whole response.json with the native '
             'write tool. Do not substring-edit JSON deliverables. Read an existing file before '
             'replacing it. Local validation must assert conditions and exit nonzero on failure; '
@@ -59,7 +74,7 @@ class IntakePrimaryClient(DshStructuredProducerClient):
                 "Read every line of assignment.json, system-contract.txt, held-candidates.json and "
                 "draft-response.json from the current input directory. Concatenate literal_chunks "
                 "objects without changing characters; continue from the exact next unread line after "
-                "truncation. The draft is unaccepted and its earlier receipt stays unknown with paid "
+                "truncation. The draft is unaccepted and its earlier receipt keeps its recorded status with paid "
                 "usage retained. Follow structured_continuation.rules. Complete the preserved capability "
                 "and concept identities under the unchanged concept_invention output contract; do not "
                 "start a new invention search or discard the authored scientific content. Reconstruct "
@@ -182,6 +197,9 @@ def preflight(root, runtime_python, *, continuation=None):
         raise StateError("first intake step requires its unused reserved session")
     backend = validate_batch_config(ticket["backend"] if ticket else json.loads((root / "backend.json").read_bytes()))
     verify_batch_runtime(backend)
+    if ticket and ticket.get('step_request', {}).get('kind') == 'concept_continuation':
+        from scisaurus.runtime.intake_guard import guarded_backend
+        guarded_backend(backend)
     if state["config_sha256"] != sha(canonical_bytes(backend)):
         raise StateError("intake backend differs from its reserved session")
     if ticket:
@@ -256,12 +274,13 @@ def preflight(root, runtime_python, *, continuation=None):
         elif kind=='concept_continuation':
             from scisaurus.runtime.intake_recovery import stopped_step
             from scisaurus.runtime.structured_recovery import recovery_request
-            if (ticket.get('prior_receipt_status')!='result_unknown'
-                    or ticket.get('reconciliation_ref')!=state['calls'][-1].get('reconciliation_ref')):
+            if (ticket.get('prior_receipt_status') not in {'result_unknown','completed'}
+                    or ticket.get('prior_receipt_status')=='result_unknown'
+                    and ticket.get('reconciliation_ref')!=state['calls'][-1].get('reconciliation_ref')):
                 raise StateError('structured continuation requires exact paid-unknown accounting')
             current_control=read_control(project/'output')
             with stopped_step(root,receipt_sha256=ticket['receipt_sha256'],
-                              attempt_path=current_control['attempt'],receipt_status='result_unknown') as context:
+                              attempt_path=current_control['attempt'],receipt_status=ticket['prior_receipt_status']) as context:
                 if request!=recovery_request(context,request['snapshot_path']):
                     raise StateError('structured continuation changed its interrupted scope or draft')
         else:raise StateError("unsupported explicit research step")
@@ -283,7 +302,7 @@ def preflight(root, runtime_python, *, continuation=None):
     return root, checkpoint, backend, assignment, protected
 
 
-def strict_backend(root, checkpoint, backend):
+def strict_backend(root, checkpoint, backend, runtime_python):
     """Seal a dedicated failure policy; the shared provider composition stays unchanged."""
     directory = root / "composer/intake-controller/runtime"
     directory.mkdir(parents=True)
@@ -307,6 +326,8 @@ def strict_backend(root, checkpoint, backend):
     active["composition"] = str(path)
     active["read_roots"] = [*active.get("read_roots", []), str(directory)]
     active["pinned_files"].update({str(plugin): sha(plugin.read_bytes()), str(path): sha(path.read_bytes())})
+    from scisaurus.runtime.intake_guard import guard_backend, GUARD_READY
+    active = guard_backend(active, directory / 'contracts', runtime_python)
     snapshot = directory / "initial-session.json"
     snapshot.write_bytes(Path(checkpoint["development_session"]["root"], "session.json").read_bytes())
     snapshot.chmod(0o444)
@@ -316,7 +337,7 @@ def strict_backend(root, checkpoint, backend):
         "initial_session": str(snapshot),
         "backend_sha256": sha(canonical_bytes(active)), "backend": active,
         "failure_policy": "cancel-owning-agent-on-tool-error-1",
-        "required_startup_marker": FAILURE_POLICY_READY,
+        "required_startup_marker": GUARD_READY,
         "preparation_sha256": sha(canonical_bytes(checkpoint))}
     body = canonical_bytes(proof)
     binding = directory / (sha(body) + ".json")
@@ -455,7 +476,7 @@ def run_once(root, runtime_python, *, recovery=None, continuation=None):
         if continuation:
             binding = ticket["backend_binding"]
         else:
-            backend, binding = strict_backend(root, checkpoint, backend)
+            backend, binding = strict_backend(root, checkpoint, backend, runtime_python)
             DevelopmentSession(checkpoint["development_session"]).bind_unused_backend(backend,
                 expected_state_sha256=checkpoint["session_initial_sha256"], binding_ref=binding)
         record["backend_binding"] = str(binding)
@@ -487,20 +508,17 @@ def run_once(root, runtime_python, *, recovery=None, continuation=None):
             system+='\nActive task refinement: structured_continuation.rules govern this explicitly '
             system+='authorized continuation. Complete the preserved unaccepted draft identities under '
             system+='the unchanged concept contract. Do not generate a new topic or discard the draft. '
-            system+='Its original unknown outcome and paid usage remain preserved.'
+            system+='Its original transport status, unadmitted scientific outcome and paid usage remain preserved.'
         result = client.complete(system=system,prompt=json.dumps(assignment))
         record.update(receipt=result.response_metadata["receipt"], usage=result.usage)
         response = result.json_object()
         record["response"] = response
+        from scisaurus.runtime.intake_contract import validate_response
+        validate_response(assignment, response)
+        from scisaurus.runtime.intake_guard import verify_publication
+        record['publication_check'] = verify_publication(record['receipt'])
         if concept:
-            from scisaurus.runtime.concept_invention import validate_concepts
             from scisaurus.runtime.input_delivery import verify_full_input_reads
-            if set(response)!={'concept_design'}:
-                raise ValidationError('concept imagination accepts one concept_design response only')
-            validate_concepts(response['concept_design'],concept,assignment['excluded_topics'])
-            if resume:
-                from scisaurus.runtime.structured_recovery import validate_continuation
-                validate_continuation(response,resume)
             record['input_read_coverage']=verify_full_input_reads(record['receipt'])
             record['status']='stopped_with_unreviewed_concepts'
         elif review:

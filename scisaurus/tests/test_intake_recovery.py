@@ -320,8 +320,11 @@ class IntakeTransportResponseTests(unittest.TestCase):
             fixture.config['pinned_files'][str(script)]=digest(script.read_bytes())
             initial=fixture.dispatch()
             before=json.loads((Path(fixture.binding['root'])/'session.json').read_bytes())
-            client=IntakePrimaryClient(fixture.config,root=fixture.project/'intake-jobs',
-                runtime_python=sys.executable,development_session=fixture.binding,forbid_reasoning=True)
+            with patch('scisaurus.runtime.intake_guard.guarded_backend',return_value={}):
+                client=IntakePrimaryClient(fixture.config,root=fixture.project/'intake-jobs',
+                    runtime_python=sys.executable,development_session=fixture.binding,forbid_reasoning=True)
+            client.runner.required_startup_marker=None
+            client.runner.task_contract=None
             assignment={'scientific_software_tools':{'response':{'tool_action':{'operation':'inventory'}}},
                         'output_contract':{'topic_selection':{}},'frozen_scientific_input':None}
             result=client.complete(system='one response only',prompt=json.dumps(assignment))

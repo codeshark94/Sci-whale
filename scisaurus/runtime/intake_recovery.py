@@ -196,6 +196,19 @@ def stopped_step(root, *, receipt_sha256, attempt_path, receipt_status):
         backend = validate_batch_config(json.loads(binding_path.read_bytes())['backend'])
         verify_batch_runtime(backend)
         initial_state=json.loads(session.path.read_bytes())
+        receipt_backend_sha=sha(canonical_bytes(backend))
+        if initial_state.get('config_sha256')!=receipt_backend_sha:
+            revisions=initial_state.get('backend_revisions',[])
+            if not revisions:
+                raise StateError('stopped frontier lost its current backend lineage')
+            binding_path=Path(revisions[-1]['path']).resolve()
+            proof_raw=binding_path.read_bytes();proof=json.loads(proof_raw)
+            if (not binding_path.is_relative_to(project/'intake-controller')
+                    or sha(proof_raw)!=revisions[-1]['sha256']
+                    or proof['session_id']!=initial_state['session_id']
+                    or proof['development_session']!=session.binding):
+                raise StateError('stopped frontier has a foreign backend revision')
+            backend=validate_batch_config(proof['backend']);verify_batch_runtime(backend)
         if receipt_status=='result_unknown' and initial_state.get('active_job'):
             session.state=initial_state
             lease=nullcontext(session)
@@ -215,7 +228,7 @@ def stopped_step(root, *, receipt_sha256, attempt_path, receipt_status):
             if (sha(receipt_raw)!=receipt_sha256 or receipt.get('status')!=receipt_status
                     or record.get('usage')!=receipt.get('usage')
                     or receipt.get('session_id')!=state['session_id']
-                    or receipt.get('config_sha256')!=state['config_sha256']
+                    or receipt.get('config_sha256')!=receipt_backend_sha
                     or receipt.get('development_session',{}).get('binding')!=session.binding
                     or receipt.get('job_directory')!=str(receipt_path.parent)
                     or receipt.get('process_reaped') is not True

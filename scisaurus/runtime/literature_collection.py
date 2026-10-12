@@ -17,7 +17,7 @@ def literature_contract():
          'limit':5}]}}
 
 
-def collect_literature(action, *, candidate_ids, root, deadline, client=None):
+def validate_literature_action(action, candidate_ids):
     if (not isinstance(action,dict) or set(action)!={'operation','arguments'}
             or action['operation']!='collect_literature' or not isinstance(action['arguments'],dict)
             or set(action['arguments'])!={'requests'}):
@@ -35,6 +35,12 @@ def collect_literature(action, *, candidate_ids, root, deadline, client=None):
     ids=[r['candidate_id'] for r in requests]
     if len(set(ids))!=len(ids) or set(ids)!=set(candidate_ids):
         raise ValidationError('literature batch must cover each unchanged candidate exactly once')
+    return normalized
+
+
+def collect_literature(action, *, candidate_ids, root, deadline, client=None):
+    normalized=validate_literature_action(action,candidate_ids)
+    requests=action['arguments']['requests']
     root=Path(root).resolve();root.mkdir(parents=True,exist_ok=True)
     marker=root/'collection.json'
     if marker.exists():

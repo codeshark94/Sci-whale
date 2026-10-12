@@ -123,7 +123,8 @@ class InventionProcessTests(unittest.TestCase):
             'response':{'tool_action':{'operation':'fetch_source | run'}},'rules':[]}
         result=SimpleNamespace(response_metadata={'receipt':str(self.receipt)},usage=self.owner.usage,
                                json_object=lambda:response)
-        with patch('scisaurus.runtime.fresh_intake.preflight',return_value=args), \
+        with patch('scisaurus.runtime.intake_guard.verify_publication',return_value={'offline_transport_fixture':True}), \
+             patch('scisaurus.runtime.fresh_intake.preflight',return_value=args), \
              patch('scisaurus.runtime.fresh_intake.IntakePrimaryClient') as client:
             client.return_value.complete.return_value=result
             try:

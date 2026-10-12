@@ -60,7 +60,8 @@ class StructuredRecoveryTests(unittest.TestCase):
                 stream.write('\n'+'\n'.join(json.dumps(e) for e in es))
             state['active_job']=str(self.receipt);self.owner.session.state=state;self.owner.session.save()
             raise DshBatchError('owned native tool abort',receipt=self.receipt,usage=self.owner.usage)
-        with patch('scisaurus.runtime.fresh_intake.preflight',return_value=args),\
+        with patch('scisaurus.runtime.intake_guard.verify_publication',return_value={'offline_transport_fixture':True}), \
+             patch('scisaurus.runtime.fresh_intake.preflight',return_value=args),\
              patch('scisaurus.runtime.fresh_intake.IntakePrimaryClient') as client:
             client.return_value.complete.side_effect=fail
             with self.assertRaises(DshBatchError):run_once(root,sys.executable,continuation=self.source_ticket,
@@ -71,7 +72,9 @@ class StructuredRecoveryTests(unittest.TestCase):
 
     def tearDown(self):self.f.tearDown()
     def prepare(self):return prepare_structured_recovery(self.owner.root,receipt_sha256=self.identity,attempt_path=self.marker)
-    def preflight(self,ticket):return self.f.preflight(ticket)
+    def preflight(self,ticket):
+        with patch('scisaurus.runtime.intake_guard.guarded_backend',return_value={}):
+            return self.f.preflight(ticket)
 
     def test_accounting_retains_unknown_usage_backend_and_exact_draft(self):
         metadata,body=preserved_document(self.receipt)
@@ -136,7 +139,8 @@ class StructuredRecoveryTests(unittest.TestCase):
         args=self.preflight(ticket);root,checkpoint,backend,assignment,protected=args
         assignment['scientific_software_tools']={'actions':{},'response':{'tool_action':{}},'rules':[]}
         request=json.loads(ticket.read_bytes())['step_request']
-        projected=deepcopy(assignment);projected.update(concept_invention=request['active_request'],structured_continuation=request)
+        projected=deepcopy(assignment);projected.update(concept_invention=request['active_request'],structured_continuation=request,
+            phase='concept_invention',output_contract=request['active_request']['output_contract'])
         stub=object.__new__(IntakePrimaryClient);inputs=stub.input_files(projected,'Continue the preserved draft.')
         self.assertEqual(json.loads(inputs['assignment.json'])['structured_output_policy']['publication'],'complete_document_write')
         task=stub.task(projected);self.assertIn('Never use substring edits',task);self.assertNotIn('boldly imagine',task)
@@ -147,7 +151,8 @@ class StructuredRecoveryTests(unittest.TestCase):
         receipt=job/'receipt.json';receipt.write_bytes(canonical_bytes(body));review_tests.events_for(job,body)
         response={'tool_action':{}} if wrong else {'concept_design':self.clean}
         result=SimpleNamespace(response_metadata={'receipt':str(receipt)},usage=self.owner.usage,json_object=lambda:response)
-        with patch('scisaurus.runtime.fresh_intake.preflight',return_value=args),\
+        with patch('scisaurus.runtime.intake_guard.verify_publication',return_value={'offline_transport_fixture':True}), \
+             patch('scisaurus.runtime.fresh_intake.preflight',return_value=args),\
              patch('scisaurus.runtime.fresh_intake.IntakePrimaryClient') as client,\
              patch('scisaurus.runtime.fresh_intake.SoftwareWorkbench',side_effect=AssertionError('no scientific tools')):
             client.return_value.complete.return_value=result
