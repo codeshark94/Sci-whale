@@ -208,7 +208,7 @@ class InventionProcessTests(unittest.TestCase):
         task=client.task({'invention_process':{}})
         # A real request is nonempty and selects the invention task.
         task=client.task({'invention_process':{'rules':['function first']}})
-        self.assertIn('unmet function, distinct physical mechanisms, falsifiable predictions',task)
-        self.assertIn('output_contract.invention',task)
-        self.assertIn('Do not submit topic_selection or tool_action',task)
-        self.assertIn('Novelty is unverified',task)
+        self.assertIn('function first',task)
+        self.assertIn('same session',task)
+        self.assertIn('never',task.lower())
+        self.assertNotIn('unmet function, distinct physical mechanisms',task)

@@ -90,7 +90,7 @@ class UnpublishedRecoveryTests(unittest.TestCase):
         a=json.loads((self.job/'input/assignment.json').read_bytes());p=a['structured_output_policy']
         self.assertEqual(p['initial_response_state'],'absent');self.assertEqual(p['preserved_document_input'],'draft-response.json')
         stub=object.__new__(IntakePrimaryClient);task=stub.task({'structured_continuation':self.request})
-        self.assertIn('Do not read it before your first successful',task)
+        self.assertIn('response.json starts absent',task)
         self.assertNotIn('read the existing output if needed',task)
         ticket=self.prepare();r=json.loads(ticket.read_bytes())['step_request']
         self.assertTrue(any('absent at dispatch start' in rule for rule in r['rules']))

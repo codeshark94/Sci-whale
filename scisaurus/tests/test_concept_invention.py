@@ -103,7 +103,7 @@ class ConceptInventionTests(unittest.TestCase):
         inputs = client_stub.input_files(projected, 'Imagine capabilities and design their structures.')
         delivered = json.loads(inputs['assignment.json'])['concept_invention']
         self.assertNotIn('held_sources', delivered); self.assertNotIn('held_catalog', delivered)
-        self.assertIn('boldly imagine', client_stub.task(projected))
+        self.assertIn('Explore qualitatively different capabilities boldly', client_stub.task(projected))
         job = self.owner.project / 'intake-jobs/concept'; (job / 'input').mkdir(parents=True); (job / 'outputs').mkdir()
         for name, raw in inputs.items(): (job / 'input' / name).write_bytes(raw)
         receipt = json.loads(self.receipt.read_bytes()); receipt.update(job_directory=str(job),

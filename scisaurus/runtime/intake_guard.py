@@ -20,7 +20,7 @@ def sealed_file(path, raw):
     path.chmod(0o444)
 
 
-def guard_backend(backend, directory, runtime_python):
+def guard_backend(backend, directory, runtime_python, *, work_mode=False):
     """Freeze source-only validator code and a dedicated composition without changing routing."""
     source_root = Path(__file__).resolve().parents[2]
     buffer = io.BytesIO()
@@ -32,12 +32,19 @@ def guard_backend(backend, directory, runtime_python):
     sources = {'checker.zip': buffer.getvalue(),
         **{name:(source_root/'scripts/dsh'/name).read_bytes() for name in
            ('intake-contract.mjs','check-intake-response.py','stop-on-tool-error.mjs')}}
-    identity = sha(canonical_bytes({name:sha(raw) for name,raw in sources.items()}))
+    identity = sha(canonical_bytes({**{name:sha(raw) for name,raw in sources.items()},
+        **({'mode':'primary-work'} if work_mode else {})}))
     policy = Path(directory)/identity
     policy.mkdir(parents=True,exist_ok=True)
     for name,raw in sources.items():sealed_file(policy/name,raw)
     composition=json.loads(Path(backend['composition']).read_bytes())
     composition=[item for item in composition if item.get('id') not in {'intake-contract','stop-on-tool-error'}]
+    if work_mode:
+        for item in composition:
+            if 'persona' in item.get('config',{}):
+                item['config']['persona']=('You are the continuing primary researcher. Current inputs are supplied inline; '
+                    'choose the work and controller tools yourself. Record research notes and use actual observations. '
+                    'No stage committee, alternate author or automatic retry. Scientific review is separate.')
     composition.append({'id':'stop-on-tool-error','name':str((policy/'stop-on-tool-error.mjs').resolve())})
     config={'python':str(Path(runtime_python).absolute()),'checker':str((policy/'check-intake-response.py').resolve()),
             'bundle':str((policy/'checker.zip').resolve())}

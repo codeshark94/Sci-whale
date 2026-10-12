@@ -28,7 +28,10 @@ def strict_document(body):
 def validate_response(assignment, response):
     if not isinstance(response, dict):
         raise ValidationError('response requires a JSON object')
-    if assignment.get('concept_invention'):
+    if assignment.get('research_work'):
+        from scisaurus.runtime.primary_work import validate_work_response
+        validate_work_response(assignment,response)
+    elif assignment.get('concept_invention'):
         from scisaurus.runtime.concept_invention import validate_concepts
         if set(response) != {'concept_design'}:
             raise ValidationError('response requires exactly concept_design')

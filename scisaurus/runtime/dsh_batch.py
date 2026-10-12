@@ -244,6 +244,9 @@ class DshBatchRunner:
                 raise ValidationError("batch file names must be relative and contained")
         if not isinstance(task, str) or not task.strip():
             raise ValidationError("batch task must be nonempty")
+        if self.task_contract and self.task_contract.get('input_delivery')=='inline':
+            from scisaurus.runtime.inline_inputs import inline_inputs
+            task+=inline_inputs(inputs)
         remaining = config["timeout_seconds"]
         if deadline is not None:
             remaining = min(remaining, deadline - time.monotonic())
@@ -321,6 +324,8 @@ class DshBatchRunner:
                     'assignment': str(frozen / 'assignment.json'),
                     'inputs': {str(frozen / name): identity for name, identity in bound.items()},
                     'first_input': str(frozen / 'unread-input.txt') if 'unread-input.txt' in bound else None}
+                if self.task_contract.get('input_delivery')=='inline':
+                    manifest.update(input_delivery='inline',mode=self.task_contract['mode'])
                 contract_path.write_bytes(canonical_bytes(manifest))
                 contract_path.chmod(0o444)
                 state['task_contract'] = {'path': str(contract_path), 'sha256': sha256(contract_path)}
@@ -574,6 +579,8 @@ class DshBatchRunner:
                         completed_turns.update(identity[1] for identity in calls_seen
                                                if identity[0] == state["session_id"])
                         current_task = continuation["task"]
+                        if self.task_contract and self.task_contract.get('input_delivery')=='inline':
+                            current_task+=inline_inputs(continuation['inputs'])
                         message_id, received, finish, done = None, False, None, False
                         pending_events.clear()
                         prompt_id += 1

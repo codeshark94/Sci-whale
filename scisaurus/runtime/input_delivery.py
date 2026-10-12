@@ -35,6 +35,50 @@ def input_read_coverage(receipt_path, *, first_input=None):
         inputs[str(path)] = {'name': name, 'lines': path.read_text().splitlines(), 'covered': set()}
     if not inputs:
         raise StateError('input delivery has no owned input files')
+    contract=receipt.get('task_contract',{})
+    if contract.get('path'):
+        manifest_path=Path(contract['path']).resolve()
+        if not manifest_path.is_relative_to(receipt_path.parent):
+            raise StateError('input delivery manifest has a foreign owner')
+        manifest_raw=manifest_path.read_bytes()
+        if sha(manifest_raw)!=contract['sha256']:
+            raise StateError('input delivery manifest changed')
+        manifest=json.loads(manifest_raw)
+        if manifest.get('input_delivery')=='inline':
+            if manifest.get('inputs')!={path:receipt['input_sha256'][v['name']] for path,v in inputs.items()}:
+                raise StateError('inline manifest changed its frozen input ownership')
+            from scisaurus.runtime.inline_inputs import inline_inputs
+            boundaries=receipt.get('turns') or [{'message_id':receipt.get('message_id'),
+                'input_directory':'input','input_sha256':receipt['input_sha256']}]
+            if (boundaries[0]['input_directory']!='input'
+                    or boundaries[0]['input_sha256']!=receipt['input_sha256']
+                    or boundaries[-1]['message_id']!=receipt.get('message_id')
+                    or len({b['message_id'] for b in boundaries})!=len(boundaries)):
+                raise StateError('inline messages lost their exact frozen boundary')
+            events_raw=(receipt_path.parent/'events.jsonl').read_bytes()
+            messages={}
+            for line in events_raw.decode().splitlines():
+                params=json.loads(line).get('params',{});event=params.get('event',{});data=event.get('data',{})
+                if params.get('sessionId')==receipt['session_id'] and event.get('type')=='user/message':
+                    messages[data.get('id')]=''.join(x.get('text','') for x in data.get('content',[]) if x.get('type')=='text')
+            delivered=True;files={}
+            for index,boundary in enumerate(boundaries):
+                directory=(receipt_path.parent/boundary['input_directory']).resolve();content={}
+                if not directory.is_relative_to(receipt_path.parent/'input'):
+                    raise StateError('inline input boundary has a foreign owner')
+                for name,identity in boundary['input_sha256'].items():
+                    path=(directory/name).resolve()
+                    if not path.is_relative_to(directory) or sha(path.read_bytes())!=identity:
+                        raise StateError('inline input boundary changed')
+                    content[name]=path.read_bytes()
+                complete=inline_inputs(content) in messages.get(boundary['message_id'],'')
+                delivered &= complete
+                for name,body in content.items():
+                    count=len(body.decode().splitlines());key=name if index==0 else str(index)+'/'+name
+                    files[key]={'total_lines':count,'displayed_lines':count if complete else 0,
+                        'missing_ranges':[] if complete else missing_ranges(set(range(1,count+1)))}
+            return {'receipt_sha256':sha(raw),'events_sha256':sha(events_raw),'complete':delivered,
+                'delivery':'inline','files':files}
     first = str((receipt_path.parent / 'input' / first_input).resolve()) if first_input else None
     if first is not None and first not in inputs:
         raise StateError('first input is not owned by this receipt')

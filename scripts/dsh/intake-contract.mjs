@@ -21,7 +21,8 @@ export function createPolicy(manifest, check) {
   const owners = new WeakMap();
   function state(agent) {
     if (!agent) throw new Error('intake tool requires its owning agent');
-    if (!owners.has(agent)) owners.set(agent, new Map([...inputs.keys()].map(p => [p, new Set()])));
+    if (!owners.has(agent)) owners.set(agent, new Map([...inputs].map(([p,input]) =>
+      [p,new Set(manifest.input_delivery==='inline' ? input.lines.map((_,i)=>i+1) : [])])));
     return owners.get(agent);
   }
   function pending(agent) {
@@ -41,7 +42,7 @@ export function createPolicy(manifest, check) {
       return;
     }
     if (exec.name === 'read') return;
-    if (exec.name === 'validate_response') return;
+    if (exec.name === (manifest.mode==='research_work' ? 'review_response' : 'validate_response')) return;
     if (exec.name !== 'write' || resolve(manifest.workspace, exec.arguments.file_path ?? '') !== output)
       return 'Intake work permits reading, whole response.json publication and validate_response only';
     try { check(exec.arguments.content); } catch (error) { return 'Exact response contract rejected publication: ' + error.message; }
@@ -80,8 +81,10 @@ export function apply(ctx, config) {
   const policy = createPolicy(manifest, check);
   ctx.tools.guard(exec => policy.guard(exec));
   ctx.on('tools/result', (exec, result) => policy.observe(exec, result));
-  ctx.tools.register({ name: 'validate_response',
-    description: 'Validate response.json against the exact sealed assignment using the authoritative controller checker. No scientific validation or admission.',
+  ctx.tools.register({ name: manifest.mode==='research_work' ? 'review_response' : 'validate_response',
+    description: manifest.mode==='research_work'
+      ? 'Check the publication and tool interface only. Research content is unadmitted; independent scientific review is separate.'
+      : 'Validate response.json against the exact sealed assignment using the authoritative controller checker. No scientific validation or admission.',
     parameters: {},
     output: { schema: { type: 'object', additionalProperties: false, required: ['validated','sha256'],
       properties: { validated: { type: 'boolean' }, sha256: { type: 'string' } } },

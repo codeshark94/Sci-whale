@@ -1,0 +1,108 @@
+"""Same-primary work packets, recorded tools and unadmitted review feedback."""
+from copy import deepcopy
+import json
+from pathlib import Path
+
+from scisaurus.core.errors import StateError,ValidationError
+from scisaurus.runtime.fresh_intake import sha
+from scisaurus.runtime.intake_recovery import stopped_step
+from scisaurus.runtime.software_workbench import tool_contract,validate_readonly_action
+
+
+def work_request(context):
+    if context['record'].get('observation',{}).get('outcome')=='result_unknown':
+        raise StateError('unknown tool execution requires reconciliation before further work')
+    response=context['response'];source_path=context['response_path']
+    if response is None:
+        for call in reversed(context['state']['calls']):
+            path=Path(call['receipt']);receipt=json.loads(path.read_bytes())
+            if receipt['status']=='completed' and receipt.get('outputs',{}).get('response.json'):
+                source_path=path.parent/'outputs/response.json';raw=source_path.read_bytes()
+                if sha(raw)!=receipt['outputs']['response.json']:
+                    raise StateError('last completed work changed')
+                response=json.loads(raw);break
+    return {'kind':'research_work','checkpoint':{
+        'receipt_sha256':sha(context['receipt_path'].read_bytes()),
+        'prior_outcome':context['receipt']['status'],
+        'reported_usage':deepcopy(context['receipt']['usage']),
+        'error':context['record'].get('error'),
+        'response_sha256':sha(source_path.read_bytes()) if response is not None else None,
+        'response':deepcopy(response),
+        'observation':deepcopy(context['record'].get('observation')),
+        'observations':deepcopy(context['record'].get('observations',[])),
+        'review_feedback':deepcopy(context['record'].get('review_feedback'))}}
+
+
+def work_assignment(original,request):
+    tools=tool_contract();tools['actions'].pop('acquire')
+    tools['response']['tool_action']['operation']=' | '.join(tools['actions'])
+    tools['rules']=['Use declared controller operations for observations; notes and tool completion are not scientific admission.']
+    retired={'phase','output_contract','scientific_software_tools','execution_step','transport_feedback',
+        'structured_output_policy','structured_continuation','concept_invention','invention_review',
+        'invention_process','literature_acquisition'}
+    return {**{key:deepcopy(value) for key,value in original.items() if key not in retired},
+        'research_work':deepcopy(request),'scientific_software_tools':tools}
+
+
+def validate_work_response(assignment,response):
+    if not isinstance(response,dict) or not response:
+        raise ValidationError('research publication requires a nonempty JSON object')
+    if 'tool_action' not in response:return
+    if set(response)!={'tool_action'}:
+        raise ValidationError('tool request cannot be mixed with research notes')
+    action=response['tool_action']
+    if (not isinstance(action,dict) or set(action)!={'operation','arguments'}
+            or action['operation'] not in assignment['scientific_software_tools']['actions']
+            or not isinstance(action['arguments'],dict)):
+        raise ValidationError('research tool request differs from its declared interface')
+    if action['operation']!='run':validate_readonly_action(action)
+
+
+def review_feedback(response):
+    return {'publication_interface':'valid','scientific_validation':'not_evaluated'}
+
+
+def tool_exchange(assignment,workbench,record):
+    """Deliver recorded tool feedback to the same owner; notes close the checkpoint."""
+    from scisaurus.core.schema import canonical_bytes
+    from scisaurus.runtime.intake_contract import strict_document
+    def exchange(files,usage):
+        response=strict_document(files['response.json']);validate_work_response(assignment,response)
+        if set(response)!={'tool_action'}:return None
+        observation=workbench.execute(response['tool_action'])
+        record.setdefault('observations',[]).append(deepcopy(observation))
+        if observation.get('outcome')!='ok':
+            raise StateError('tool execution failed or is unknown; stop without another model request')
+        workbench.retain_observation(observation)
+        return {'task':'Continue the same work from the recorded tool result. Publish notes or choose the next declared tool.',
+            'inputs':{'tool-result.json':canonical_bytes(observation)}}
+    return exchange
+
+
+def prepare_work_step(root,*,receipt_sha256,attempt_path,runtime_python):
+    from scisaurus.runtime.run_control import save_control
+    from scisaurus.runtime.structured_recovery import seal_guarded_ticket
+    from scisaurus.core.events import ControlStore
+    from scisaurus.core.store import ArtifactStore
+    record=json.loads(Path(attempt_path).read_bytes());status=json.loads(Path(record['receipt']).read_bytes())['status']
+    if status not in {'completed','result_unknown'}:
+        raise StateError('work requires a settled result or an explicitly owned unknown accounting request')
+    with stopped_step(root,receipt_sha256=receipt_sha256,attempt_path=attempt_path,receipt_status=status) as context:
+        request=work_request(context)
+        if status=='result_unknown':
+            control_store=ControlStore(context['project'])
+            try:
+                store=ArtifactStore(control_store)
+                if context['state']['active_job'] is None:
+                    proof=store.get(context['state']['calls'][-1]['reconciliation_ref'])
+                else:
+                    proof=context['session'].reconcile_stopped_attempt(context['backend'],store,
+                        attempt_path=context['marker'],receipt_sha256=receipt_sha256)
+            finally:control_store.close()
+            context['reconciliation_ref']=proof['artifact_ref']
+            context['state_raw']=context['session'].path.read_bytes()
+            context['state']=json.loads(context['state_raw'])
+        control=json.loads(context['control_raw']);control['controller']='primary-work'
+        save_control(context['project']/'output',control)
+        context['control_raw']=(context['project']/'output/run-control.json').read_bytes()
+    return seal_guarded_ticket(context,request,runtime_python)

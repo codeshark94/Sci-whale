@@ -307,6 +307,12 @@ class SoftwareWorkbench:
             raise ValidationError("scientific software operation exceeded the stage deadline")
         return remaining
 
+    def retain_observation(self,observation):
+        """Admit only a verified local receipt to subsequent receipt-reading tools."""
+        ref=observation['receipt_ref']
+        self._receipt(ref,require_success=False)
+        self.history_refs=self.history_refs | {ref}
+
     def _fetch(self, url, *, archive=False):
         # URLs are constructed exclusively from the GitHub API/codeload roots.
         limit = 128 * 1024 * 1024 if archive else 8 * 1024 * 1024
