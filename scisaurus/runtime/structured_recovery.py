@@ -96,10 +96,21 @@ def prepare_guarded_continuation(root, *, receipt_sha256, attempt_path, runtime_
             'document_base64':base64.b64encode(body).decode('ascii'),'scientific_outcome':'not_assessed'})
         path=directory/(sha(raw)+'.json');sealed_file(path,raw)
         request=recovery_request(c,path)
-        previous_raw=c['state_raw'];previous=c['state'];old=c['backend']
-        active=guard_backend(old,directory/'contracts',runtime_python)
-        if active==old:
-            return seal_stopped_step(c,request)
+    return seal_guarded_ticket(c,request,runtime_python)
+
+
+def seal_guarded_ticket(c, request, runtime_python):
+    from scisaurus.runtime.intake_guard import guard_backend, sealed_file
+    directory=c['project']/'intake-controller/recoveries'/c['state']['calls'][-1]['sha256']
+    directory.mkdir(parents=True,exist_ok=True)
+    previous_raw=c['state_raw'];previous=c['state'];old=c['backend']
+    active=guard_backend(old,directory/'contracts',runtime_python)
+    from scisaurus.runtime.run_control import control_lock
+    with control_lock(c['project']/'output'):
+        if ((c['project']/'output/run-control.json').read_bytes()!=c['control_raw']
+                or c['session'].path.read_bytes()!=previous_raw):
+            raise StateError('guarded continuation lost its stopped control or session')
+        if active==old:return seal_stopped_step(c,request)
         snapshots=directory/'sessions';snapshots.mkdir(exist_ok=True)
         snapshot=snapshots/(sha(previous_raw)+'.json');sealed_file(snapshot,previous_raw)
         proof={'schema_version':'recovered-development-backend-1','development_session':c['session'].binding,
@@ -108,10 +119,6 @@ def prepare_guarded_continuation(root, *, receipt_sha256, attempt_path, runtime_
             'previous_backend':old,'backend':active,'backend_sha256':sha(canonical_bytes(active)),
             'transport_change':'native_read_before_work_and_authoritative_response_contract'}
         proof_raw=canonical_bytes(proof);binding=directory/(sha(proof_raw)+'.json');sealed_file(binding,proof_raw)
-    from scisaurus.runtime.run_control import control_lock
-    with control_lock(c['project']/'output'):
-        if sha((c['project']/'output/run-control.json').read_bytes())!=sha(c['control_raw']):
-            raise StateError('guarded continuation lost its stopped control')
         c['session'].bind_recovered_backend(active,expected_state_sha256=sha(previous_raw),binding_ref=binding)
         c['state_raw']=c['session'].path.read_bytes();c['state']=json.loads(c['state_raw'])
         c['backend']=active;c['binding_path']=binding

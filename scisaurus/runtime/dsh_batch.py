@@ -182,7 +182,9 @@ class DshBatchRunner:
         self.development_session = (DevelopmentSession(development_session)
                                     if development_session is not None else None)
 
-    def run(self, task, *, inputs, seed_files=None, outputs, deadline=None, exchange=None):
+    def run(self, task, *, inputs, seed_files=None, outputs, deadline=None, exchange=None, startup_only=False):
+        if startup_only and (self.development_session is not None or exchange is not None):
+            raise ValidationError('offline startup verification cannot own a research session or exchange')
         deadline = min(deadline if deadline is not None else math.inf,
                        time.monotonic() + self.config["timeout_seconds"])
         lease = (self.development_session.lease(self.config, deadline)
@@ -191,19 +193,19 @@ class DshBatchRunner:
             try:
                 return self._dispatch(task, inputs=inputs, seed_files=seed_files,
                                       outputs=outputs, deadline=deadline, exchange=exchange,
-                                      development=development)
+                                      development=development, startup_only=startup_only)
             finally:
                 if development is not None and development.state.get("active_job"):
                     development.settle(development.state["active_job"])
 
-    def _dispatch(self, task, *, inputs, seed_files, outputs, deadline, exchange, development):
+    def _dispatch(self, task, *, inputs, seed_files, outputs, deadline, exchange, development, startup_only=False):
         # One DSH session has sequential model steps. Keep its slot until the
         # process tree is reaped, including periods spent editing and executing.
         try:
             with model_dispatch_slot(deadline=deadline) as slot:
                 return self._run(task, inputs=inputs, seed_files=seed_files,
                                  outputs=outputs, deadline=deadline, dispatch_slot=slot, exchange=exchange,
-                                 development=development)
+                                 development=development, startup_only=startup_only)
         except DshBatchError:
             raise
         except (ValidationError, TimeoutError, OSError) as exc:
@@ -225,7 +227,7 @@ class DshBatchRunner:
             raise DshBatchError(str(exc), receipt=receipt, usage=usage) from exc
 
     def _run(self, task, *, inputs, seed_files, outputs, deadline, dispatch_slot, exchange=None,
-             development=None):
+             development=None, startup_only=False):
         ensure_run_allowed()
         config = validate_batch_config(self.config)
         verify_batch_runtime(config)
@@ -324,7 +326,7 @@ class DshBatchRunner:
                 state['task_contract'] = {'path': str(contract_path), 'sha256': sha256(contract_path)}
                 save()
                 env['SCISAURUS_TASK_CONTRACT'] = str(contract_path)
-            profile = sandbox_profile(work, config["command"], allow_network=True,
+            profile = sandbox_profile(work, config["command"], allow_network=not startup_only,
                 read_only_paths=[str(frozen), *config["read_roots"], *self.runtime_read_roots,
                                  *(development.read_roots if development is not None else []),
                                  *([str(contract_path.parent)] if contract_path is not None else []),
@@ -445,8 +447,11 @@ class DshBatchRunner:
         if self.required_startup_marker is not None:
             state["startup_contract"] = {"marker": self.required_startup_marker, "observed": False}
         def start_prompt():
-            nonlocal prompt_started
+            nonlocal prompt_started, done, finish
             if not initialized or not startup_ready or prompt_started:
+                return
+            if startup_only:
+                finish='startup-verified';done=True
                 return
             prompt_started = True
             if prompt_id == 3:
@@ -579,6 +584,12 @@ class DshBatchRunner:
                             "contentBlocks": [{"type": "text", "text":
                                 f"Immutable task files: {current_input}\nWritable workspace: {work}\n" + current_task}]})
             ensure_run_allowed()
+            if startup_only:
+                if finish!='startup-verified' or prompt_started or state['usage']['model_calls']!=0:
+                    raise RuntimeError('offline startup verification cannot dispatch a model')
+                state.update(status='startup_verified',finish_reason=finish,network_enabled=False,prompt_requests=0)
+                return {'files':{},'receipt':str(receipt),'usage':dict(state['usage']),
+                        'elapsed_seconds':time.monotonic()-start}
             if finish != "completed":
                 raise RuntimeError(f"DSH job ended with {finish!r}; files are not accepted")
             files = read_outputs()

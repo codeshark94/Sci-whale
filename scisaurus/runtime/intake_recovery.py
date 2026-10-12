@@ -263,6 +263,7 @@ def seal_stopped_step(context, request):
         'receipt_sha256':identity,'prior_receipt_status':status,'backend':c['backend'],
         'backend_binding':str(c['binding_path']),'backend_binding_sha256':sha(c['binding_path'].read_bytes()),
         **({'reconciliation_ref':c['reconciliation_ref']} if c.get('reconciliation_ref') else {}),
+        **({'prelaunch_reconciliation_ref':c['prelaunch_reconciliation_ref']} if c.get('prelaunch_reconciliation_ref') else {}),
         'step_request':request,'feedback':{'prior_outcome':('completed but not scientifically admitted' if status=='completed'
             else 'unknown; no scientific output accepted'),'reported_usage':c['receipt']['usage'],
             **({'billing_completeness':'partial_unfinalized'} if status=='result_unknown' else {}),

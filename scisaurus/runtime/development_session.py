@@ -133,26 +133,7 @@ class DevelopmentSession:
                         raise ValidationError("development session owner or backend changed")
                     if self.state.get("active_job"):
                         raise ValidationError("development session has an unsettled dispatch")
-                    versions = self._verify_backend_lineage(self.state)
-                    for index, call in enumerate(self.state["calls"]):
-                        receipt_path = Path(call["receipt"]).resolve()
-                        body = receipt_path.read_bytes()
-                        if hashlib.sha256(body).hexdigest() != call["sha256"]:
-                            raise ValidationError("development session receipt changed")
-                        receipt = json.loads(body)
-                        owner = receipt.get("development_session", {})
-                        if (receipt.get("job_directory") != str(receipt_path.parent)
-                                or owner.get("binding") != self.binding
-                                or owner.get("prior_receipts") != self.state["calls"][:index]
-                                or receipt.get("session_id") != self.state["session_id"]
-                                or receipt.get("config_sha256") != next((key for key, boundary in reversed(list(versions.items()))
-                                    if index >= boundary), None)
-                                or not receipt.get("process_reaped")
-                                or not (receipt.get("status") == "completed"
-                                    or receipt.get("status") == "failed" and receipt.get("outcome_known") is True
-                                    or self._reconciled_unknown(call, receipt))):
-                            raise ValidationError("development session requires a settled, reaped outcome")
-                        _verify_receipt_files(receipt_path, receipt)
+                    self.verify_history()
                 else:
                     self.state = {"schema_version": "dsh-development-session-1", "binding": self.binding,
                                   "config_sha256": digest, "session_id": uuid.uuid4().hex,
@@ -161,6 +142,29 @@ class DevelopmentSession:
                 yield self
             finally:
                 fcntl.flock(lock, fcntl.LOCK_UN)
+
+    def verify_history(self):
+        """Verify the immutable settled prefix independently of active launch ownership."""
+        versions = self._verify_backend_lineage(self.state)
+        for index, call in enumerate(self.state["calls"]):
+            receipt_path = Path(call["receipt"]).resolve()
+            body = receipt_path.read_bytes()
+            if hashlib.sha256(body).hexdigest() != call["sha256"]:
+                raise ValidationError("development session receipt changed")
+            receipt = json.loads(body)
+            owner = receipt.get("development_session", {})
+            if (receipt.get("job_directory") != str(receipt_path.parent)
+                    or owner.get("binding") != self.binding
+                    or owner.get("prior_receipts") != self.state["calls"][:index]
+                    or receipt.get("session_id") != self.state["session_id"]
+                    or receipt.get("config_sha256") != next((key for key, boundary in reversed(list(versions.items()))
+                        if index >= boundary), None)
+                    or not receipt.get("process_reaped")
+                    or not (receipt.get("status") == "completed"
+                        or receipt.get("status") == "failed" and receipt.get("outcome_known") is True
+                        or self._reconciled_unknown(call, receipt))):
+                raise ValidationError("development session requires a settled, reaped outcome")
+            _verify_receipt_files(receipt_path, receipt)
 
     def _reconciled_unknown(self, call, receipt):
         if receipt.get("status") != "result_unknown" or not call.get("reconciliation_ref"):

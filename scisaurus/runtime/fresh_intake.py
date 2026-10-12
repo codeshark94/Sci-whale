@@ -279,10 +279,14 @@ def preflight(root, runtime_python, *, continuation=None):
                     and ticket.get('reconciliation_ref')!=state['calls'][-1].get('reconciliation_ref')):
                 raise StateError('structured continuation requires exact paid-unknown accounting')
             current_control=read_control(project/'output')
-            with stopped_step(root,receipt_sha256=ticket['receipt_sha256'],
-                              attempt_path=current_control['attempt'],receipt_status=ticket['prior_receipt_status']) as context:
-                if request!=recovery_request(context,request['snapshot_path']):
-                    raise StateError('structured continuation changed its interrupted scope or draft')
+            if ticket.get('prelaunch_reconciliation_ref'):
+                from scisaurus.runtime.prelaunch_recovery import verify_continuation
+                verify_continuation(root,ticket)
+            else:
+                with stopped_step(root,receipt_sha256=ticket['receipt_sha256'],
+                                  attempt_path=current_control['attempt'],receipt_status=ticket['prior_receipt_status']) as context:
+                    if request!=recovery_request(context,request['snapshot_path']):
+                        raise StateError('structured continuation changed its interrupted scope or draft')
         else:raise StateError("unsupported explicit research step")
     if not Path(runtime_python).is_file():
         raise StateError("intake requires an installed Python runtime")
