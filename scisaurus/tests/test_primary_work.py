@@ -56,6 +56,15 @@ class PrimaryWorkTests(unittest.TestCase):
         self.assertEqual(execute(action)['outcome'],'result_unknown')
         self.assertEqual(record['observations'][-1],bench.execute.return_value)
 
+    def test_plain_user_feedback_is_delivered_without_a_research_output_contract(self):
+        feedback='Use the available established open-source tools for a small physical check; keep unverified claims unresolved.'
+        ticket=prepare_work_step(self.owner.root,receipt_sha256=self.f.identity,
+            attempt_path=self.f.marker,runtime_python=sys.executable,feedback=feedback)
+        assignment=work_assignment(self.preflight(ticket)[3],json.loads(ticket.read_bytes())['step_request'])
+        self.assertEqual(assignment['research_work']['feedback'],feedback)
+        self.assertNotIn('output_contract',assignment)
+        self.assertEqual(json.loads(self.owner.session.path.read_bytes())['calls'],json.loads(self.before)['calls'])
+
     def mocked_note(self,ticket,delivery=True,notes=None,workspace_notes=None):
         args=self.preflight(ticket);root,cp,backend,assignment,protected=args;t=json.loads(ticket.read_bytes())
         assignment=work_assignment(assignment,t['step_request']);stub=object.__new__(IntakePrimaryClient);inputs=stub.input_files(assignment,'primary work')

@@ -8,4 +8,5 @@ from scisaurus.runtime.primary_work import prepare_work_step
 
 parser=argparse.ArgumentParser(description=__doc__)
 for name in ('root','receipt-sha256','attempt-path','runtime-python'):parser.add_argument('--'+name,required=True)
+parser.add_argument('--feedback',help='Plain user guidance for the continuing primary session')
 args=vars(parser.parse_args());root=args.pop('root');print(prepare_work_step(root,**args))

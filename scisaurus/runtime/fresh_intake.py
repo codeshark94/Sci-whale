@@ -157,7 +157,7 @@ def preflight(root, runtime_python, *, continuation=None):
                 raise StateError('research work requires its exact paid unknown reconciliation')
             with stopped_step(root,receipt_sha256=ticket['receipt_sha256'],receipt_status=ticket['prior_receipt_status'],
                     attempt_path=read_control(project/'output')['attempt']) as context:
-                if request!=work_request(context):
+                if request!=work_request(context,request.get('feedback')):
                     raise StateError('research work changed its current checkpoint or feedback')
         elif kind=="literature_acquisition":
             path=Path(request["proposal_path"]).resolve()

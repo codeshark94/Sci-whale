@@ -35,7 +35,7 @@ def checkpoint_response(receipt_path, receipt):
     return path, response
 
 
-def work_request(context):
+def work_request(context, feedback=None):
     observations=[context['record'].get('observation') or {},*context['record'].get('observations',[])]
     if (any(x.get('outcome')=='result_unknown' for x in observations)
             or any(x.get('status')=='requested' for x in context['receipt'].get('native_tool_calls',[]))):
@@ -55,7 +55,7 @@ def work_request(context):
             for block in data.get('message',{}).get('content',[]):
                 if block.get('isError') and block.get('toolCallId') in calls:
                     failures.append({'call':deepcopy(calls[block['toolCallId']]),'result':deepcopy(block)})
-    return {'kind':'research_work','checkpoint':{
+    return {'kind':'research_work',**({'feedback':feedback} if feedback is not None else {}),'checkpoint':{
         'receipt_sha256':sha(context['receipt_path'].read_bytes()),
         'prior_outcome':context['receipt']['status'],
         'reported_usage':deepcopy(context['receipt']['usage']),
@@ -106,7 +106,7 @@ def native_tool_handler(assignment,workbench,record):
     return execute
 
 
-def prepare_work_step(root,*,receipt_sha256,attempt_path,runtime_python):
+def prepare_work_step(root,*,receipt_sha256,attempt_path,runtime_python,feedback=None):
     from scisaurus.runtime.run_control import save_control
     from scisaurus.runtime.structured_recovery import seal_guarded_ticket
     from scisaurus.core.events import ControlStore
@@ -115,7 +115,7 @@ def prepare_work_step(root,*,receipt_sha256,attempt_path,runtime_python):
     if status not in {'completed','result_unknown'}:
         raise StateError('work requires a settled result or an explicitly owned unknown accounting request')
     with stopped_step(root,receipt_sha256=receipt_sha256,attempt_path=attempt_path,receipt_status=status) as context:
-        request=work_request(context)
+        request=work_request(context,feedback)
         if status=='result_unknown':
             control_store=ControlStore(context['project'])
             try:
