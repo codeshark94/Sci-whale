@@ -160,12 +160,15 @@ class DshBatchRunner:
     """One fresh session per work order, with controller-owned receipts."""
 
     def __init__(self, config, *, root, runtime_read_roots=(), laboratory=None,
-                 development_session=None, isolated_from=()):
+                 development_session=None, isolated_from=(), required_startup_marker=None):
         self.config = validate_batch_config(config)
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.runtime_read_roots = [str(Path(p).resolve()) for p in runtime_read_roots]
         self.isolated_from = tuple(str(Path(p).resolve()) for p in isolated_from)
+        if required_startup_marker is not None and (not isinstance(required_startup_marker, str) or not required_startup_marker):
+            raise ValidationError("DSH startup marker must be a nonempty string")
+        self.required_startup_marker = required_startup_marker
         self.laboratory = laboratory
         from scisaurus.runtime.development_session import DevelopmentSession
         self.development_session = (DevelopmentSession(development_session)
@@ -408,6 +411,23 @@ class DshBatchRunner:
                     raise RuntimeError(f"DSH job did not produce a contained regular file: {name}")
                 files[name] = path.read_bytes()
             return files
+        initialized = False
+        prompt_started = False
+        startup_ready = self.required_startup_marker is None
+        startup_bytes = bytearray()
+        if self.required_startup_marker is not None:
+            state["startup_contract"] = {"marker": self.required_startup_marker, "observed": False}
+        def start_prompt():
+            nonlocal prompt_started
+            if not initialized or not startup_ready or prompt_started:
+                return
+            prompt_started = True
+            if prompt_id == 3:
+                send(2, "session/resume", {"sessionId": state["session_id"]})
+            else:
+                send(prompt_id, "session/prompt", {"sessionId": state["session_id"],
+                    "contentBlocks": [{"type": "text", "text":
+                        f"Immutable task files: {frozen}\nWritable workspace: {work}\n" + task}]})
         try:
             state.update(status="running", pid=process.pid)
             save()
@@ -433,6 +453,15 @@ class DshBatchRunner:
                         name = key.data
                         if name == "stderr":
                             errors.write(chunk)
+                            if self.required_startup_marker is not None and not startup_ready:
+                                startup_bytes.extend(chunk)
+                                if self.required_startup_marker.encode() + b"\n" in startup_bytes:
+                                    startup_ready = True
+                                    state["startup_contract"]["observed"] = True
+                                    save()
+                                    start_prompt()
+                                else:
+                                    del startup_bytes[:-len(self.required_startup_marker.encode())-1]
                             continue
                         buffers[name].extend(chunk)
                         if len(buffers[name]) > 60_000_000:
@@ -445,12 +474,8 @@ class DshBatchRunner:
                             if payload.get("error"):
                                 raise RuntimeError(f"DSH protocol error: {payload['error']}")
                             if payload.get("id") == 1:
-                                if prompt_id == 3:
-                                    send(2, "session/resume", {"sessionId": state["session_id"]})
-                                else:
-                                    send(prompt_id, "session/prompt", {"sessionId": state["session_id"],
-                                    "contentBlocks": [{"type": "text", "text":
-                                        f"Immutable task files: {frozen}\nWritable workspace: {work}\n" + task}]})
+                                initialized = True
+                                start_prompt()
                             elif payload.get("id") == 2 and resume_pending:
                                 if payload.get("result", {}).get("sessionId") != state["session_id"]:
                                     raise RuntimeError("DSH resume returned a foreign session")
@@ -744,7 +769,7 @@ class DshStructuredProducerClient:
 
     deliverable_label = "structured producer"
 
-    def __init__(self, config, *, root, runtime_python, development_session=None, isolated_from=()):
+    def __init__(self, config, *, root, runtime_python, development_session=None, isolated_from=(), required_startup_marker=None):
         self.config = validate_batch_config(config)
         self.model = config["model"]
         self.timeout_seconds = config["timeout_seconds"]
@@ -752,7 +777,8 @@ class DshStructuredProducerClient:
         self.runtime_python = str(Path(runtime_python).absolute())
         self.runner = DshBatchRunner(config, root=root,
             runtime_read_roots=[str(Path(runtime_python).absolute().parent.parent)],
-            development_session=development_session, isolated_from=isolated_from)
+            development_session=development_session, isolated_from=isolated_from,
+            required_startup_marker=required_startup_marker)
 
     def task(self, assignment):
         task = (

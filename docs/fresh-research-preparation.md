@@ -43,3 +43,36 @@ not scientific admission. Subsequent research must retain that same owner and
 require a model-owned frozen pilot, a small installed-solver execution, independent
 same-result validation and replay, and a fresh final scientific audit. No timer,
 process-policy change or prepared file constitutes recovery authorization.
+
+## One explicit intake step
+
+`scripts/run-prepared-research-turn.py --root <mission> --runtime-python <python>
+--preflight` verifies the sealed inputs, unused session and effective backend read
+grants without a provider request. Prior sibling mission directories are excluded
+from the new primary's read grants.
+
+Actual dispatch additionally requires `--recovery <json>`, containing an externally
+observed `source` and a past timezone-aware `observed_at`. The controller binds a
+single explicit attempt to the prepared checkpoint and reserved session. It makes
+one DSH dispatch, accepts one response, executes at most one declared source/runtime
+assessment operation and stops. Installation and scientific computation are absent
+from that first step's active tool contract. A proposal remains unreviewed; format,
+tool, provider and custody failures stop without another author or repair request.
+One DSH dispatch can contain several sequential provider calls; its actual receipt
+and usage are retained rather than equating a dispatch with one model call.
+
+Activation seals a dedicated composition with the same provider/model and a native
+tool-failure policy; the shared composition stays unchanged. The policy cancels
+the owning DSH agent synchronously on tool errors or structured foreground command
+failures, including nonzero exits, timeouts, signals and sandbox denial. The runner
+waits for the policy's registration marker before sending its first prompt. This
+marker proves listener registration; observing an actual error cancellation is a
+separate runtime check. The unused session is rebound under its owner lock to the
+new pinned composition, preserving its identity and original empty-state snapshot.
+An optional `--runtime-env-file` loads existing owner-local credentials only after
+external recovery evidence is supplied, without copying secrets into task files.
+
+The attempt marker blocks redispatch even after an error. Any interruption or paid
+unknown remains a recovery obligation, not permission to repeat the step. Final
+cleanup restores the durable stop and revokes launch permission. No actual intake
+step or recovery evidence is supplied by preparation or preflight.

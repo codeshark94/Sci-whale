@@ -60,6 +60,57 @@ class DevelopmentSession:
         temporary.write_bytes(canonical_bytes(self.state))
         temporary.replace(self.path)
 
+    def bind_unused_backend(self, config, *, expected_state_sha256, binding_ref):
+        """Bind an unused reservation to a sealed activation contract without changing its identity."""
+        with (self.root / "owner.lock").open("a+b") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise ValidationError("development reservation is already owned") from exc
+            raw = self.path.read_bytes()
+            state = json.loads(raw)
+            if (hashlib.sha256(raw).hexdigest() != expected_state_sha256
+                    or state.get("schema_version") != "dsh-development-session-1"
+                    or state.get("binding") != self.binding or not state.get("session_id")
+                    or state.get("calls") != [] or state.get("active_job") is not None):
+                raise ValidationError("backend activation requires the exact unused development reservation")
+            proof = Path(binding_ref).resolve()
+            if not proof.is_file() or not proof.is_relative_to(Path(self.binding["project_id"])):
+                raise ValidationError("backend activation proof belongs to another project")
+            body = json.loads(proof.read_bytes())
+            identity = hashlib.sha256(canonical_bytes(config)).hexdigest()
+            if (body.get("initial_session_sha256") != expected_state_sha256
+                    or body.get("session_id") != state["session_id"]
+                    or body.get("backend_sha256") != identity
+                    or body.get("development_session") != self.binding):
+                raise ValidationError("backend activation proof differs from its reservation or configuration")
+            state.update(config_sha256=identity, pre_dispatch_binding={
+                "path": str(proof), "sha256": hashlib.sha256(proof.read_bytes()).hexdigest()})
+            self._verify_unused_backend_binding(state)
+            self.state = state
+            self.save()
+
+    def _verify_unused_backend_binding(self, state):
+        reference = state["pre_dispatch_binding"]
+        path = Path(reference["path"]).resolve()
+        raw = path.read_bytes()
+        proof = json.loads(raw)
+        if (not path.is_relative_to(Path(self.binding["project_id"]))
+                or hashlib.sha256(raw).hexdigest() != reference["sha256"]
+                or proof.get("development_session") != self.binding
+                or proof.get("session_id") != state["session_id"]
+                or proof.get("backend_sha256") != state["config_sha256"]
+                or hashlib.sha256(canonical_bytes(proof.get("backend"))).hexdigest() != state["config_sha256"]):
+            raise ValidationError("development activation lost its sealed backend proof")
+        original = Path(proof["initial_session"])
+        original_raw = original.read_bytes()
+        initial = json.loads(original_raw)
+        if (not original.resolve().is_relative_to(path.parent)
+                or hashlib.sha256(original_raw).hexdigest() != proof["initial_session_sha256"]
+                or initial.get("binding") != self.binding or initial.get("session_id") != state["session_id"]
+                or initial.get("calls") != [] or initial.get("active_job") is not None):
+            raise ValidationError("development activation lost its unused reservation")
+
     @contextmanager
     def lease(self, config, deadline):
         with (self.root / "owner.lock").open("a+b") as lock:
@@ -82,6 +133,8 @@ class DevelopmentSession:
                         raise ValidationError("development session owner or backend changed")
                     if self.state.get("active_job"):
                         raise ValidationError("development session has an unsettled dispatch")
+                    if self.state.get("pre_dispatch_binding"):
+                        self._verify_unused_backend_binding(self.state)
                     for index, call in enumerate(self.state["calls"]):
                         receipt_path = Path(call["receipt"]).resolve()
                         body = receipt_path.read_bytes()
