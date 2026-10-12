@@ -1,13 +1,19 @@
 /** Require current input delivery before work and exact response validation before publication. */
 import { createHash } from 'node:crypto';
-import { readFileSync, realpathSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
+import { dirname, relative, resolve, sep } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 export const name = 'intake-contract';
 export const inject = ['tools'];
 export const marker = 'SCISAURUS_INTAKE_CONTRACT_READY:read-before-work-exact-publication-1';
 const hash = value => createHash('sha256').update(value).digest('hex');
+
+export function nativeTools(mode) {
+  return mode === 'research_work'
+    ? ['read', 'read_image', 'write', 'edit', 'inspect_workspace', 'review_response']
+    : ['read', 'write', 'inspect_workspace', 'validate_response'];
+}
 
 export function createPolicy(manifest, check) {
   const inputs = new Map(Object.entries(manifest.inputs).map(([path, digest]) => {
@@ -18,6 +24,24 @@ export function createPolicy(manifest, check) {
     return [realpathSync(path), { digest, lines }];
   }));
   const output = resolve(manifest.output);
+  const workspace = realpathSync(manifest.workspace);
+  function ownedFile(path) {
+    let ancestor = resolve(manifest.workspace, path ?? '');
+    while (true) {
+      try { lstatSync(ancestor); break; } catch (error) {
+        if (error.code !== 'ENOENT') return false;
+      }
+      const parent = dirname(ancestor);
+      if (parent === ancestor) return false;
+      ancestor = parent;
+    }
+    let actual;
+    try { actual = realpathSync(ancestor); } catch { return false; }
+    if (actual !== ancestor) return false;
+    const target = relative(workspace, actual);
+    const lexical = relative(workspace, resolve(manifest.workspace, path ?? ''));
+    return [target, lexical].every(value => value !== '..' && !value.startsWith('..' + sep) && !value.startsWith(sep));
+  }
   const owners = new WeakMap();
   function state(agent) {
     if (!agent) throw new Error('intake tool requires its owning agent');
@@ -41,10 +65,17 @@ export function createPolicy(manifest, check) {
       if (hash(readFileSync(path)) !== inputs.get(path).digest) return 'sealed input changed: ' + path;
       return;
     }
-    if (exec.name === 'read') return;
+    if (!nativeTools(manifest.mode).includes(exec.name))
+      return 'Tool is outside the declared native interface: ' + exec.name;
+    if (['read', 'read_image', 'inspect_workspace'].includes(exec.name)) return;
     if (exec.name === (manifest.mode==='research_work' ? 'review_response' : 'validate_response')) return;
+    if (manifest.mode === 'research_work' && ['write', 'edit'].includes(exec.name)) {
+      if (!ownedFile(exec.arguments.file_path)) return 'Research files must remain in the owning workspace';
+      if (resolve(manifest.workspace, exec.arguments.file_path ?? '') !== output) return;
+      if (exec.name === 'edit') return 'Publish response.json as a complete document with write';
+    }
     if (exec.name !== 'write' || resolve(manifest.workspace, exec.arguments.file_path ?? '') !== output)
-      return 'Intake work permits reading, whole response.json publication and validate_response only';
+      return 'Intake publication requires a whole response.json write';
     try { check(exec.arguments.content); } catch (error) { return 'Exact response contract rejected publication: ' + error.message; }
   }
   function observe(exec, result) {
@@ -81,6 +112,17 @@ export function apply(ctx, config) {
   const policy = createPolicy(manifest, check);
   ctx.tools.guard(exec => policy.guard(exec));
   ctx.on('tools/result', (exec, result) => policy.observe(exec, result));
+  ctx.on('agent/created', ({ agent }) => {
+    agent.ctx.tools.restrict({ allow: nativeTools(manifest.mode) });
+  });
+  ctx.tools.register({ name: 'inspect_workspace',
+    description: 'List the current writable workspace and check whether response.json exists. An absent response is normal before publication; this does not read file contents.',
+    parameters: {},
+    output: { schema: { type: 'object', additionalProperties: false, required: ['workspace', 'entries', 'response_exists'],
+      properties: { workspace: { type: 'string' }, entries: { type: 'array', items: { type: 'string' } }, response_exists: { type: 'boolean' } } },
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
+    execute: () => ({ workspace: manifest.workspace, entries: readdirSync(manifest.workspace).sort(), response_exists: existsSync(manifest.output) }),
+  });
   ctx.tools.register({ name: manifest.mode==='research_work' ? 'review_response' : 'validate_response',
     description: manifest.mode==='research_work'
       ? 'Check the publication and tool interface only. Research content is unadmitted; independent scientific review is separate.'

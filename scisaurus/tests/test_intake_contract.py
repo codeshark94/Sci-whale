@@ -211,8 +211,8 @@ try{
  shown('1: one',false,{});assert.match(policy.guard(work),/Read every/);
  shown('1: one');assert.equal(policy.guard(work),undefined);assert.equal(checks,1);
  assert.match(policy.guard({...work,arguments:{...work.arguments,content:'bad'}}),/extra field/);
- assert.match(policy.guard({name:'bash',arguments:{command:'echo passed'},agent}),/permits reading/);
- assert.match(policy.guard({name:'edit',arguments:{file_path:manifest.output},agent}),/permits reading/);
+ assert.match(policy.guard({name:'bash',arguments:{command:'echo passed'},agent}),/declared native interface/);
+ assert.match(policy.guard({name:'edit',arguments:{file_path:manifest.output},agent}),/declared native interface/);
  assert.equal(policy.guard({name:'validate_response',arguments:{},agent}),undefined);
  const first=createPolicy({...manifest,first_input:path},()=>{});
  assert.match(first.guard({name:'read',arguments:{file_path:manifest.output},agent}),/Read every/);

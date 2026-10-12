@@ -39,11 +39,16 @@ def guard_backend(backend, directory, runtime_python, *, work_mode=False):
     for name,raw in sources.items():sealed_file(policy/name,raw)
     composition=json.loads(Path(backend['composition']).read_bytes())
     composition=[item for item in composition if item.get('id') not in {'intake-contract','stop-on-tool-error'}]
+    for item in composition:
+        if 'toolBash' in item.get('config', {}) or 'persona' in item.get('config', {}):
+            item.setdefault('config', {})['toolBash'] = False
     if work_mode:
         for item in composition:
             if 'persona' in item.get('config',{}):
                 item['config']['persona']=('You are the continuing primary researcher. Current inputs are supplied inline; '
-                    'choose the work and controller tools yourself. Record research notes and use actual observations. '
+                    'choose the work and controller tools yourself. Use native read/write/edit for your own research files '
+                    'and inspect_workspace for directory and output existence checks. Execute computations and external '
+                    'observations through the declared controller operations. Record research notes and use actual observations. '
                     'No stage committee, alternate author or automatic retry. Scientific review is separate.')
     composition.append({'id':'stop-on-tool-error','name':str((policy/'stop-on-tool-error.mjs').resolve())})
     config={'python':str(Path(runtime_python).absolute()),'checker':str((policy/'check-intake-response.py').resolve()),

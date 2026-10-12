@@ -155,14 +155,83 @@ class InlineTransportTests(unittest.TestCase):
         finally:fixture.tearDown()
 
 class NativeWorkPolicyTests(unittest.TestCase):
+    def test_installed_tool_stack_advertises_and_executes_the_same_interface(self):
+        import shutil,subprocess,tempfile
+        from scisaurus.runtime.intake_guard import guard_backend,guarded_backend
+        node=str(Path(shutil.which('node') or '/Users/seungyeop/.hermes/node/bin/node').resolve())
+        dsh=Path('/Users/seungyeop/workspace/dsh/packages')
+        if not (dsh/'core/tools/lib/index.js').exists():self.skipTest('installed DSH unavailable')
+        plugin=(Path(__file__).resolve().parents[2]/'scripts/dsh/intake-contract.mjs').as_uri()
+        code=r'''
+import assert from 'node:assert/strict';
+import {mkdtempSync,writeFileSync,readFileSync,rmSync,realpathSync} from 'node:fs';
+import {tmpdir} from 'node:os';import {join} from 'node:path';import {createHash} from 'node:crypto';
+const base=DSH;const {Context}=await import(base+'/core/tools/node_modules/@deepseek-ai/cordis/lib/index.js');
+const {default:SystemPrompt}=await import(base+'/core/system-prompt/lib/index.js');
+const {default:ToolRuntime}=await import(base+'/core/tools/lib/index.js');
+const {createScope}=await import(base+'/core/scope/lib/index.js');
+const {LocalFileSystem}=await import(base+'/fs/fs-local/lib/index.js');
+const FsPolicy=await import(base+'/fs/fs-observation-policy/lib/index.js');
+const ToolFs=await import(base+'/fs/tool-fs/lib/index.js');
+const Intake=await import(PLUGIN);
+const dir=WORKSPACE;
+const ctx=new Context();
+try{
+ await ctx.plugin(SystemPrompt);await ctx.plugin(ToolRuntime);
+ await ctx.plugin(LocalFileSystem,{cwd:dir});await ctx.plugin(FsPolicy);await ctx.plugin(ToolFs);
+ // Global extras reproduce the previous presentation surface without running them.
+ for(const name of ['bash','todo_write','subagent','read_image'])ctx.tools.register({name,description:name,parameters:{},
+   output:{schema:{type:'string'},render:(_a,v)=>[{type:'text',text:v}]},execute(){throw Error('unexpected extra tool body');}});
+ const input=join(dir,'assignment.json');const assignment='{"research_work":{"kind":"research_work"},"scientific_software_tools":{"actions":{}}}';writeFileSync(input,assignment);
+ const manifest=join(dir,'manifest.json');writeFileSync(manifest,JSON.stringify({workspace:dir,output:join(dir,'response.json'),
+   assignment:input,inputs:{[input]:createHash('sha256').update(assignment).digest('hex')},input_delivery:'inline',mode:'research_work'}));
+ process.env.SCISAURUS_TASK_CONTRACT=manifest;await ctx.plugin(Intake,CHECKER_CONFIG);
+ const agent={id:'offline-native-owner',session:{header:{cwd:dir}},cancel(){}};let scope;
+ await ctx.plugin(Object.assign(inner=>{scope=createScope(inner,agent);agent.ctx=scope.ctx;},{inject:['tools','systemPrompt','fs']}));
+ ctx.emit('agent/created',{agent});
+ const advertised=ctx.tools.schemas(agent).map(x=>x.name).sort();
+ assert.deepEqual(advertised,Intake.nativeTools('research_work').sort());
+ let counter=0;async function call(name,args){return ctx.tools.execute({agent,name,arguments:args,callId:'offline-'+(++counter),signal:new AbortController().signal});}
+ let result=await call('inspect_workspace',{});assert.equal(result.isError,false);assert.equal(result.value.response_exists,false);
+ result=await call('write',{file_path:join(dir,'pilot/source.py'),content:'value = 1\n'});assert.equal(result.isError,false,JSON.stringify(result));
+ result=await call('read',{file_path:join(dir,'pilot/source.py')});assert.equal(result.isError,false);
+ result=await call('edit',{file_path:join(dir,'pilot/source.py'),old_string:'value = 1',new_string:'value = 2'});assert.equal(result.isError,false,JSON.stringify(result));
+ assert.equal(readFileSync(join(dir,'pilot/source.py'),'utf8'),'value = 2\n');
+ result=await call('write',{file_path:join(dir,'response.json'),content:'{"note":"unadmitted checkpoint"}'});
+ assert.equal(result.isError,false,JSON.stringify(result));
+ result=await call('inspect_workspace',{});assert.equal(result.value.response_exists,true);
+ result=await call('review_response',{});assert.equal(result.isError,false);assert.equal(result.value.validated,true);
+ result=await call('read',{file_path:join(dir,'response.json')});assert.equal(result.isError,false);
+ result=await call('write',{file_path:join(dir,'response.json'),content:'{"broken":'});assert.equal(result.isError,true);
+ assert.equal(readFileSync(join(dir,'response.json'),'utf8'),'{"note":"unadmitted checkpoint"}');
+ result=await call('bash',{command:'anything'});assert.equal(result.isError,true);
+ assert(!advertised.includes('bash'));assert(!advertised.includes('subagent'));
+ console.log(JSON.stringify({advertised,source_write_read_edit:true,workspace_inspection:true,provider_requests:0}));
+}finally{rmSync(dir,{recursive:true,force:true});}
+'''.replace('DSH',json.dumps(str(dsh))).replace('PLUGIN',json.dumps(plugin))
+        with tempfile.TemporaryDirectory() as directory:
+            from scisaurus.runtime.program_sandbox import SANDBOX_EXEC,sandbox_profile
+            root=Path(directory).resolve();work=root/'work';work.mkdir();temporary=root/'tmp';temporary.mkdir()
+            composition=root/'composition.json';composition.write_text('[]')
+            backend=guard_backend({'composition':str(composition),'read_roots':[],'pinned_files':{}},
+                root/'sealed',sys.executable,work_mode=True)
+            code=code.replace('CHECKER_CONFIG',json.dumps(guarded_backend(backend))).replace('WORKSPACE',json.dumps(str(work)))
+            command=[node,'--input-type=module','-e',code]
+            profile=sandbox_profile(work,[node],allow_network=False,temporary_workspace=temporary,
+                read_only_paths=[str(dsh.parent),str(root/'sealed'),str(Path(sys.executable).resolve().parent.parent),
+                    str(Path(sys.executable).absolute().parent.parent),
+                    str(Path(__file__).resolve().parents[2]/'scripts/dsh')])
+            result=subprocess.run([SANDBOX_EXEC,'-p',profile,*command],cwd=work,text=True,capture_output=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+
     def test_inline_free_notes_and_optional_review_use_installed_native_schema(self):
         import shutil,subprocess,tempfile
         node=shutil.which('node') or '/Users/seungyeop/.hermes/node/bin/node'
         plugin=(Path(__file__).resolve().parents[2]/'scripts/dsh/intake-contract.mjs').as_uri()
         code=r'''
-import {mkdtempSync,writeFileSync,rmSync,realpathSync} from 'node:fs';import {tmpdir} from 'node:os';
+import {mkdtempSync,writeFileSync,rmSync,realpathSync,symlinkSync} from 'node:fs';import {tmpdir} from 'node:os';
 import {join} from 'node:path';import {createHash} from 'node:crypto';import assert from 'node:assert/strict';
-const {createPolicy,apply}=await import(PLUGIN);const dir=realpathSync(mkdtempSync(join(tmpdir(),'primary-work-')));
+const {createPolicy,apply,nativeTools}=await import(PLUGIN);const dir=realpathSync(mkdtempSync(join(tmpdir(),'primary-work-')));
 try{const path=join(dir,'assignment.json');const raw=JSON.stringify({research_work:{kind:'research_work'}});
 writeFileSync(path,raw);const manifest={workspace:dir,output:join(dir,'response.json'),assignment:path,
  inputs:{[path]:createHash('sha256').update(raw).digest('hex')},input_delivery:'inline',mode:'research_work'};
@@ -170,10 +239,24 @@ const policy=createPolicy(manifest,JSON.parse);const agent={};
 assert.equal(policy.pending(agent).length,0);
 assert.equal(policy.guard({name:'write',agent,arguments:{file_path:manifest.output,content:'{"new_mechanism":"free notes"}'}}),undefined);
 assert.equal(policy.guard({name:'review_response',agent,arguments:{}}),undefined);
-assert.match(policy.guard({name:'bash',agent,arguments:{command:'other author'}}),/permits reading/);
+assert.match(policy.guard({name:'bash',agent,arguments:{command:'other author'}}),/declared native interface/);
+assert.equal(policy.guard({name:'write',agent,arguments:{file_path:join(dir,'pilot/source.py'),content:'source'}}),undefined);
+assert.equal(policy.guard({name:'edit',agent,arguments:{file_path:join(dir,'source.py')}}),undefined);
+assert.match(policy.guard({name:'edit',agent,arguments:{file_path:manifest.output}}),/complete document/);
+assert.match(policy.guard({name:'write',agent,arguments:{file_path:join(dir,'../foreign.py'),content:'source'}}),/owning workspace/);
+symlinkSync('/tmp',join(dir,'escape'));
+assert.match(policy.guard({name:'write',agent,arguments:{file_path:join(dir,'escape/source.py'),content:'source'}}),/owning workspace/);
+symlinkSync('/tmp/missing-scisaurus-native-file',join(dir,'dangling'));
+assert.match(policy.guard({name:'write',agent,arguments:{file_path:join(dir,'dangling'),content:'source'}}),/owning workspace/);
 const mp=join(dir,'manifest.json');writeFileSync(mp,JSON.stringify(manifest));process.env.SCISAURUS_TASK_CONTRACT=mp;
-let registered;apply({tools:{guard(){},register(value){registered=value;}},on(){}},{});
+let registered,inspect,created;apply({tools:{guard(){},register(value){registered=value;if(value.name==='inspect_workspace')inspect=value;}},on(name,callback){if(name==='agent/created')created=callback;}},{});
 assert.equal(registered.name,'review_response');assert.match(registered.description,/independent scientific review/);
+let mask;created({agent:{ctx:{tools:{restrict(value){mask=value;}}}}});assert.deepEqual(mask.allow,nativeTools('research_work'));
+assert(!mask.allow.includes('bash'));assert(!mask.allow.includes('todo_write'));
+assert.equal(inspect.execute().response_exists,false);
+writeFileSync(manifest.output,'{}');assert.equal(inspect.execute().response_exists,true);
+symlinkSync(manifest.output,join(dir,'alias'));
+assert.match(policy.guard({name:'write',agent,arguments:{file_path:join(dir,'alias'),content:'invalid'}}),/owning workspace/);
 }finally{rmSync(dir,{recursive:true});}
 '''.replace('PLUGIN',json.dumps(plugin))
         result=subprocess.run([node,'--input-type=module','-e',code],text=True,capture_output=True)

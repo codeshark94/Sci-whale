@@ -61,7 +61,9 @@ class IntakePrimaryClient(DshStructuredProducerClient):
         if assignment.get('research_work'):
             return ("Continue the same research session. The complete current inputs are delivered in "
                 "this message; read files only when useful. You own the research choices, design, code "
-                "and interpretation. Use the declared controller tools for external observations. "
+                "and interpretation. Use read/write/edit for research files in your writable workspace. "
+                "Use inspect_workspace for directory and response-file existence checks; no shell tool is available. "
+                "Use the declared controller tools for computations and external observations. "
                 "Write response.json as a nonempty JSON object containing your research notes, or one "
                 "tool_action. That output starts absent; write it directly. Notes have no prescribed scientific fields. review_response returns "
                 "feedback only and is optional. A note or a successful tool is not scientific validation. "
