@@ -41,11 +41,24 @@ class InventionProcessTests(unittest.TestCase):
         obs=collect_literature(action,candidate_ids=self.ids,root=f.project/'intake-controller/current.literature',
             deadline=time.monotonic()+2,client=FakeLiterature())
         job=f.project/'intake-jobs/observation';(job/'input').mkdir(parents=True);(job/'outputs').mkdir()
-        (job/'input/assignment.json').write_bytes((f.job/'input/assignment.json').read_bytes())
+        (job/'input/assignment.json').write_text(json.dumps(json.loads((f.job/'input/assignment.json').read_bytes()),indent=2))
+        (job/'input/system-contract.txt').write_bytes((f.root/'inputs/system-contract.txt').read_bytes())
         response={'tool_action':action};(job/'outputs/response.json').write_bytes(canonical_bytes(response))
         receipt=deepcopy(f.body);receipt.update(job_directory=str(job),
             development_session={'binding':f.binding,'prior_receipts':first['calls']},
             outputs={'response.json':sha((job/'outputs/response.json').read_bytes())})
+        receipt['input_sha256']['system-contract.txt']=sha((job/'input/system-contract.txt').read_bytes())
+        receipt['input_sha256']['assignment.json']=sha((job/'input/assignment.json').read_bytes())
+        receipt['transport_turns']=[1]
+        events=[]
+        for name in receipt['input_sha256']:
+            path=job/'input'/name
+            displayed='\n'.join(f'{i}: {text}' for i,text in enumerate(path.read_text().splitlines(),1))
+            for kind,data in [('tool/call',{'name':'read','callId':name,'arguments':json.dumps({'file_path':str(path)})}),
+                              ('tool/result',{'message':{'content':[{'toolCallId':name,'isError':False,
+                                  'content':[{'text':f'<path>{path}</path>\n{displayed}'}]}]}})]:
+                events.append({'params':{'sessionId':receipt['session_id'],'event':{'type':kind,'data':{'turn':1,**data}}}})
+        (job/'events.jsonl').write_text('\n'.join(json.dumps(e) for e in events))
         self.receipt=job/'receipt.json';self.receipt.write_bytes(canonical_bytes(receipt));self.identity=sha(self.receipt.read_bytes())
         first['calls'].append({'receipt':str(self.receipt),'sha256':self.identity,'usage':receipt['usage']})
         f.session.state=first;f.session.save()
@@ -141,6 +154,53 @@ class InventionProcessTests(unittest.TestCase):
         record=json.loads(ticket.with_suffix('.attempt.json').read_bytes())
         self.assertEqual(record['status'],'stopped_on_error')
         self.assertTrue(json.loads((self.owner.project/'output/run-control.json').read_bytes())['stop_requested'])
+
+    def test_skipped_input_lines_stop_after_paid_response_without_retry(self):
+        ticket=self.prepare()
+        path=self.receipt.parent/'events.jsonl'
+        events=[json.loads(x) for x in path.read_text().splitlines()]
+        block=events[1]['params']['event']['data']['message']['content'][0]['content'][0]
+        block['text']='\n'.join(line for line in block['text'].splitlines() if not line.startswith('2: '))
+        path.write_text('\n'.join(json.dumps(e) for e in events))
+        with self.assertRaisesRegex(StateError,'input delivery is incomplete'):
+            self.run_mocked(ticket,{'invention':{'decision':'abstain','directions':[],'limitations':['Unknown']}})
+        record=json.loads(ticket.with_suffix('.attempt.json').read_bytes())
+        self.assertEqual(record['status'],'stopped_on_error')
+        self.assertFalse(record['input_read_coverage']['complete'])
+        self.assertEqual(self.owner.session.path.read_bytes(),self.before)
+        self.assertEqual(self.f.output.read_bytes(),self.proposal_before)
+
+    def test_unrelated_read_results_cannot_cover_owned_inputs(self):
+        from scisaurus.runtime.input_delivery import input_read_coverage
+        path=self.receipt.parent/'events.jsonl'
+        original=path.read_text()
+        for change in ['turn','session','call','text']:
+            with self.subTest(change=change):
+                events=[json.loads(x) for x in original.splitlines()]
+                result=events[1]['params'];data=result['event']['data']
+                block=data['message']['content'][0]
+                if change=='turn':data['turn']=2
+                elif change=='session':result['sessionId']='foreign'
+                elif change=='call':block['toolCallId']='unobserved'
+                else:block['content'][0]['text']=block['content'][0]['text'].replace('1: {','1: invented')
+                path.write_text('\n'.join(json.dumps(e) for e in events))
+                self.assertFalse(input_read_coverage(self.receipt)['complete'])
+
+    def test_input_delivery_rechecks_archived_input_hashes(self):
+        from scisaurus.runtime.input_delivery import input_read_coverage
+        (self.receipt.parent/'input/assignment.json').write_text('{}')
+        with self.assertRaisesRegex(StateError,'exact input'):input_read_coverage(self.receipt)
+
+    def test_result_in_another_owned_turn_does_not_match_read_call(self):
+        from scisaurus.runtime.input_delivery import input_read_coverage
+        receipt=json.loads(self.receipt.read_bytes());receipt['transport_turns']=[1,2]
+        self.receipt.write_bytes(canonical_bytes(receipt))
+        path=self.receipt.parent/'events.jsonl'
+        events=[json.loads(x) for x in path.read_text().splitlines()]
+        for row in events:
+            if row['params']['event']['type']=='tool/result':row['params']['event']['data']['turn']=2
+        path.write_text('\n'.join(json.dumps(e) for e in events))
+        self.assertFalse(input_read_coverage(self.receipt)['complete'])
 
     def test_primary_task_is_function_first_and_has_no_other_author_or_tool_operation(self):
         task=IntakePrimaryClient.task(None,{'invention_process':{}})

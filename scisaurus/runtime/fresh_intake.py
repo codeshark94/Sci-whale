@@ -35,6 +35,8 @@ class IntakePrimaryClient(DshStructuredProducerClient):
                 "supply your own scientific hypotheses. Do not submit topic_selection or tool_action, "
                 "retrieve more literature, run a solver, delegate authorship, or repair a failed tool. "
                 "The controller checks the schema and stops; it does not certify creativity or science. "
+                "Read every input line, continuing from the exact next unread line after truncation; "
+                "do not skip ranges. The controller rejects incomplete input delivery without another call. "
                 "A failed local tool aborts this attempt before another model step.")
         return ("Read assignment.json and system-contract.txt. Follow the active single-step intake "
                 "contract. The response schemas are in assignment.json: scientific_software_tools.response "
@@ -340,8 +342,10 @@ def run_once(root, runtime_python, *, recovery=None, continuation=None):
         record["response"] = response
         if invention:
             from scisaurus.runtime.invention import validate_invention
+            from scisaurus.runtime.input_delivery import verify_full_input_reads
             if set(response)!={"invention"}:raise ValidationError("invention step accepts one invention response only")
             validate_invention(response["invention"],invention,assignment["excluded_topics"])
+            record['input_read_coverage']=verify_full_input_reads(record['receipt'])
             record["status"]="stopped_with_unreviewed_invention"
         elif set(response) == {"tool_action"}:
             action = response["tool_action"]
@@ -372,6 +376,8 @@ def run_once(root, runtime_python, *, recovery=None, continuation=None):
             raise ValidationError("intake output must be one tool action or a topic-selection proposal")
     except BaseException as error:
         record.update(status="stopped_on_error", error=f"{type(error).__name__}: {error}")
+        if getattr(error, 'input_read_coverage', None) is not None:
+            record['input_read_coverage']=error.input_read_coverage
         if getattr(error, "receipt", None):
             record["receipt"] = str(error.receipt)
         if getattr(error, "usage", None) is not None:
