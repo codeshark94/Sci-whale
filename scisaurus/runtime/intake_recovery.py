@@ -31,8 +31,11 @@ def reasoning_off_composition(composition, provider, model):
     return value
 
 
-def prepare_continuation(root, *, receipt_sha256):
+def prepare_continuation(root, *, receipt_sha256, attempt_path=None):
     """Account a reaped unknown and seal one explicit next step without provider access."""
+    if (not isinstance(receipt_sha256, str) or len(receipt_sha256) != 64
+            or any(c not in "0123456789abcdef" for c in receipt_sha256)):
+        raise StateError("intake recovery requires an exact SHA256 receipt identity")
     root = Path(root).resolve()
     project = root / "composer"
     pointer = json.loads((root / "preparation.json").read_bytes())
@@ -88,8 +91,15 @@ def prepare_continuation(root, *, receipt_sha256):
     with control_lock(project / "output"):
         if read_control(project / "output").get("stop_requested") is not True:
             raise StateError("intake recovery requires stopped execution")
-        attempt_path = project / "intake-controller/attempt.json"
+        attempt_path = (Path(attempt_path).resolve() if attempt_path is not None
+                        else project / "intake-controller/attempt.json")
+        if not attempt_path.is_relative_to(project / "intake-controller"):
+            raise StateError("intake recovery attempt belongs to another project")
         attempt = json.loads(attempt_path.read_bytes())
+        state = json.loads(session.path.read_bytes())
+        current = state.get("active_job") or (state["calls"][-1]["receipt"] if state["calls"] else None)
+        if current != attempt.get("receipt") or sha(Path(current).read_bytes()) != receipt_sha256:
+            raise StateError("intake recovery requires its latest exactly owned attempt")
         binding = json.loads(Path(attempt["backend_binding"]).read_bytes())
         backend = validate_batch_config(binding["backend"])
         verify_batch_runtime(backend)

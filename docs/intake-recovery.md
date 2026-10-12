@@ -2,7 +2,7 @@
 
 A stopped primary intake retains its original session, receipt, task inputs, workspace and history. Reported usage is recorded as `partial_unfinalized`; accounting releases the transport owner without accepting an unknown answer or certifying a final invoice.
 
-`prepare-intake-recovery.py --root MISSION --receipt-sha256 SHA` verifies the sealed stopped attempt, reaped process, original configuration, task hashes and paid ownership. It publishes accounting and reconciliation artifacts and a content-addressed continuation ticket. This operation makes no provider request. Local preparation can resume after interruption using the same ticket; a consumed dispatch cannot be repeated.
+`prepare-intake-recovery.py --root MISSION --receipt-sha256 SHA [--attempt MARKER]` verifies the sealed stopped attempt, reaped process, original configuration, task hashes and paid ownership. It publishes accounting and reconciliation artifacts and a content-addressed continuation ticket. Later explicit steps name their exact stopped marker and latest owned receipt; earlier attempts cannot authorize another recovery. This operation makes no provider request. Local preparation can resume after interruption using the same ticket; a consumed dispatch cannot be repeated.
 
 Backend revision proofs retain each prior configuration and its exact call boundary. Recovery changes the transport composition only, preserving the provider, model, command and output capacity. The Ollama OpenAI-compatible composition declares `reasoning_effort: "none"` explicitly. Other runtimes keep their existing configuration.
 

@@ -212,6 +212,36 @@ class ExplicitPreparationTests(IntakeAccountingTests):
         ticket.with_suffix('.attempt.json').write_bytes(b'{}')
         with self.assertRaises(StateError): self.prepare()
 
+    def test_next_explicit_recovery_uses_exact_latest_marker_and_preserves_history(self):
+        from scisaurus.runtime.intake_recovery import prepare_continuation
+        first=self.prepare()
+        ticket=json.loads(first.read_bytes())
+        before=json.loads(self.session.path.read_bytes())
+        job=self.project/'intake-jobs/next';(job/'input').mkdir(parents=True)
+        (job/'input/assignment.json').write_bytes(b'{"question":null}')
+        receipt=deepcopy(self.body)
+        receipt.update(job_directory=str(job),config_sha256=before['config_sha256'],
+            development_session=dict(binding=self.binding,prior_receipts=before['calls']))
+        path=job/'receipt.json';path.write_bytes(canonical_bytes(receipt));identity=digest(path.read_bytes())
+        before['active_job']=str(path);self.session.state=before;self.session.save()
+        marker=first.with_suffix('.attempt.json')
+        attempt=deepcopy(self.attempt_body);attempt.update(receipt=str(path),backend_binding=ticket['backend_binding'])
+        raw=canonical_bytes(attempt);marker.write_bytes(raw)
+        (self.project/'intake-controller'/(digest(raw)+'.json')).write_bytes(raw)
+        before_rejection=self.session.path.read_bytes()
+        with self.assertRaises(StateError):
+            prepare_continuation(self.root,receipt_sha256=self.sha,attempt_path=self.attempt)
+        self.assertEqual(self.session.path.read_bytes(),before_rejection)
+        second=prepare_continuation(self.root,receipt_sha256=identity,attempt_path=marker)
+        after=json.loads(self.session.path.read_bytes())
+        self.assertNotEqual(first,second)
+        self.assertEqual(after['session_id'],'original')
+        self.assertEqual(len(after['calls']),2)
+        self.assertEqual(after['calls'][0],before['calls'][0])
+        self.assertIsNone(after['active_job'])
+        self.assertEqual(len(after['backend_revisions']),2)
+        with self.session.lease(json.loads(second.read_bytes())['backend'],time.monotonic()+1):pass
+
     def test_tampered_published_backend_proof_never_mutates_session(self):
         with patch.object(DevelopmentSession,'bind_recovered_backend',side_effect=OSError('local interruption')):
             with self.assertRaises(OSError): self.prepare()
@@ -235,3 +265,75 @@ class IntakeResponseDeliveryTests(unittest.TestCase):
         self.assertIn('response.json directly in the declared writable workspace',task)
         self.assertIn('already formatted',task)
         self.assertIn('outside the read grants',task)
+
+
+class IntakeSandboxResponseTests(unittest.TestCase):
+    @unittest.skipUnless(__import__('scisaurus.runtime.program_sandbox',fromlist=['SANDBOX_EXEC']).SANDBOX_EXEC,
+                         'Seatbelt execution required')
+    def test_parent_listing_is_denied_but_exact_input_and_response_paths_work(self):
+        import subprocess
+        from scisaurus.runtime.program_sandbox import sandbox_profile,SANDBOX_EXEC
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary).resolve()
+            job=root/'controller/jobs/current';frozen=job/'input';frozen.mkdir(parents=True)
+            work=root/'session/work';work.mkdir(parents=True)
+            (job/'private-schema.json').write_text('private controller metadata')
+            (frozen/'assignment.json').write_text(json.dumps({'scientific_software_tools':{
+                'response':{'tool_action':{'operation':'inventory'}}}},indent=2))
+            source = """import json,subprocess
+from pathlib import Path
+frozen=Path(__import__('sys').argv[1]);work=Path(__import__('sys').argv[2])
+result=subprocess.run(['/bin/ls','-la',str(frozen.parent)],capture_output=True,text=True)
+assert result.returncode != 0, 'controller directory listing must remain denied'
+assignment=json.loads((frozen/'assignment.json').read_bytes())
+assert assignment['scientific_software_tools']['response']['tool_action']['operation']=='inventory'
+(work/'response.json').write_text(json.dumps({'tool_action':{'operation':'inventory'}}))
+print('input read; parent denied; response written')
+"""
+            command=[sys.executable,'-c',source,str(frozen),str(work)]
+            profile=sandbox_profile(work,command,read_only_paths=[str(frozen)],directory_sync_paths=work.parents)
+            result=subprocess.run([SANDBOX_EXEC,'-p',profile,*command],cwd=work,capture_output=True,text=True,timeout=10)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertIn('parent denied; response written',result.stdout)
+            self.assertEqual(json.loads((work/'response.json').read_bytes())['tool_action']['operation'],'inventory')
+
+
+class IntakeTransportResponseTests(unittest.TestCase):
+    def test_resumed_primary_receives_schema_and_exports_response_without_controller_lookup(self):
+        from scisaurus.runtime.fresh_intake import IntakePrimaryClient
+        fixture=DevelopmentSessionTests('test_history_workspace_and_usage_continue_across_producer_boundaries')
+        fixture.setUp()
+        try:
+            script=Path(fixture.config['command'][1])
+            source=FAKE.replace("Path('answer.txt').write_text(str(n))", """Path('answer.txt').write_text(str(n))
+  task=p['contentBlocks'][0]['text']
+  if 'response.json directly' in task:
+   assert 'scientific_software_tools.response' in task
+   assert 'output_contract.topic_selection' in task
+   frozen=Path(task.split('Immutable task files: ',1)[1].split('\\n',1)[0])
+   a=json.loads((frozen/'assignment.json').read_bytes())
+   assert a['scientific_software_tools']['response']['tool_action']['operation']=='inventory'
+   assert 'already formatted' in task and 'outside the read grants' in task
+   Path('response.json').write_text(json.dumps({'tool_action':{'operation':'inventory'}}))
+""")
+            script.write_text(source)
+            fixture.config['pinned_files'][str(script)]=digest(script.read_bytes())
+            initial=fixture.dispatch()
+            before=json.loads((Path(fixture.binding['root'])/'session.json').read_bytes())
+            client=IntakePrimaryClient(fixture.config,root=fixture.project/'intake-jobs',
+                runtime_python=sys.executable,development_session=fixture.binding,forbid_reasoning=True)
+            assignment={'scientific_software_tools':{'response':{'tool_action':{'operation':'inventory'}}},
+                        'output_contract':{'topic_selection':{}},'frozen_scientific_input':None}
+            result=client.complete(system='one response only',prompt=json.dumps(assignment))
+            self.assertEqual(result.json_object(),{'tool_action':{'operation':'inventory'}})
+            after=json.loads((Path(fixture.binding['root'])/'session.json').read_bytes())
+            self.assertEqual(after['session_id'],before['session_id'])
+            self.assertEqual(after['calls'][0],before['calls'][0])
+            self.assertEqual(len(after['calls']),2)
+            receipt=Path(result.response_metadata['receipt'])
+            value=json.loads(receipt.read_bytes())
+            self.assertTrue(value['development_session']['resumed'])
+            self.assertEqual(value['usage']['model_calls'],1)
+            self.assertEqual(json.loads((receipt.parent/'outputs/response.json').read_bytes()),result.json_object())
+        finally:
+            fixture.tearDown()
