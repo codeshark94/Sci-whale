@@ -36,7 +36,10 @@ def checkpoint_response(receipt_path, receipt):
 
 
 def work_request(context, feedback=None):
-    observations=[context['record'].get('observation') or {},*context['record'].get('observations',[])]
+    delivered=json.loads((context['receipt_path'].parent/'input/assignment.json').read_bytes())
+    inherited=delivered.get('research_work',{}).get('checkpoint',{})
+    observations=[*inherited.get('observations',[]),context['record'].get('observation') or {},
+                  *context['record'].get('observations',[])]
     if (any(x.get('outcome')=='result_unknown' for x in observations)
             or any(x.get('status')=='requested' for x in context['receipt'].get('native_tool_calls',[]))):
         raise StateError('unknown tool execution requires reconciliation before further work')
@@ -64,7 +67,7 @@ def work_request(context, feedback=None):
         'response_sha256':sha(source_path.read_bytes()) if response is not None else None,
         'response':deepcopy(response),
         'observation':deepcopy(context['record'].get('observation')),
-        'observations':deepcopy(context['record'].get('observations',[])),
+        'observations':deepcopy([x for x in observations if x]),
         'review_feedback':deepcopy(context['record'].get('review_feedback'))}}
 
 

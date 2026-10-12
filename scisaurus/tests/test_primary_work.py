@@ -65,6 +65,21 @@ class PrimaryWorkTests(unittest.TestCase):
         self.assertNotIn('output_contract',assignment)
         self.assertEqual(json.loads(self.owner.session.path.read_bytes())['calls'],json.loads(self.before)['calls'])
 
+    def test_bookkeeping_step_keeps_earlier_actual_tool_receipts_available(self):
+        from scisaurus.runtime.primary_work import work_request
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            job=Path(directory);(job/'input').mkdir();(job/'events.jsonl').write_text('')
+            receipt=job/'receipt.json';receipt.write_text('{}')
+            prior={'outcome':'ok','receipt_ref':'software:sha256:owned','result':{'output':{'observed':2}}}
+            (job/'input/assignment.json').write_text(json.dumps({'research_work':{'checkpoint':{'observations':[prior]}}}))
+            note=job/'notes.md';note.write_text('A bookkeeping-only checkpoint')
+            context={'record':{'observations':[]},'receipt':{'status':'completed','usage':{'model_calls':1}},
+                'receipt_path':receipt,'response':{'notes':note.read_text()},'response_path':note,
+                'state':{'session_id':'same-primary','calls':[]}}
+            request=work_request(context)
+            self.assertEqual(request['checkpoint']['observations'],[prior])
+
     def mocked_note(self,ticket,delivery=True,notes=None,workspace_notes=None):
         args=self.preflight(ticket);root,cp,backend,assignment,protected=args;t=json.loads(ticket.read_bytes())
         assignment=work_assignment(assignment,t['step_request']);stub=object.__new__(IntakePrimaryClient);inputs=stub.input_files(assignment,'primary work')
