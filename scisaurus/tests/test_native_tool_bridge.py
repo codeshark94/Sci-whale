@@ -19,6 +19,7 @@ from scisaurus.runtime.intake_guard import guard_backend,guarded_backend,GUARD_R
 from scisaurus.runtime.primary_work import work_assignment,native_tool_handler,work_instructions
 from scisaurus.runtime.software_workbench import SoftwareWorkbench
 from scisaurus.runtime.development_session import _verify_receipt_files
+from scisaurus.runtime.software_workbench import run_arguments_schema,validate_run_arguments
 
 
 class BridgeTests(unittest.TestCase):
@@ -77,6 +78,28 @@ class BridgeTests(unittest.TestCase):
         second=deepcopy(request);second['params']['callId']='second'
         with self.assertRaisesRegex(ValidationError,'already stopped'):self.bridge.respond(second)
         self.assertEqual(self.handler.call_count,1);self.assertEqual(self.state['native_tool_calls'][0]['outcome'],'result_unknown')
+    def test_direct_computation_arguments_keep_the_exact_bridge_owner(self):
+        args={'source':'program','input':{},'purpose':'scientific_computation','expected':None,'runtime':'declared'}
+        self.bridge.observe({'method':'session.event','params':{'sessionId':'owner','event':{'type':'tool/call',
+            'data':{'name':'research_run','callId':'direct','arguments':json.dumps(args)}}}})
+        self.bridge.respond({'method':METHOD,'params':{'channel':self.bridge.channel,'sessionId':'owner','callId':'direct',
+            'action':{'operation':'run','arguments':args}}})
+        self.handler.assert_called_once_with({'operation':'run','arguments':args})
+
+
+class RunArgumentTests(unittest.TestCase):
+    def test_required_reference_artifact_and_runtime_contracts_are_checked_before_execution(self):
+        valid={'source':'program','input':{},'purpose':'scientific_computation','expected':None,'runtime':'declared'}
+        validate_run_arguments(valid)
+        for change in ({'expected':{}},{'expected':{'value':{},'absolute_tolerance':-1,'relative_tolerance':0}},
+                       {'inputs':[{}]},{'outputs':[{'name':'file','extra':'invalid'}]},
+                       {'environment_ref':'also-set'}):
+            with self.subTest(change=change),self.assertRaises(ValidationError):validate_run_arguments({**valid,**change})
+        for field in ('input','expected'):
+            missing=deepcopy(valid);del missing[field]
+            with self.assertRaises(ValidationError):validate_run_arguments(missing)
+        schema=run_arguments_schema();reference=schema['properties']['expected']['oneOf'][1]
+        self.assertEqual(set(reference['required']),{'value','absolute_tolerance','relative_tolerance'})
 
 
 @unittest.skipUnless(os.environ.get('SCISAURUS_DSH_CONFIG'),'explicit installed runtime configuration required')
@@ -99,9 +122,9 @@ class InstalledRuntimeTests(unittest.TestCase):
                     'choices':[{'index':0,'delta':{'role':'assistant','content':None}}]})
                 if len(requests)==1:
                     name='research_tool';args={'operation':'check_environment','arguments':{}}
-                    if run_program:args={'operation':'run','arguments':{'runtime':runtime_label,
+                    if run_program:name='research_run';args={'runtime':runtime_label,
                         'source':'import json\nprint(json.dumps({"value": 2 + 2}))\n','input':{},
-                        'purpose':'scientific_computation','expected':None}}
+                        'purpose':'scientific_computation','expected':None}
                 elif len(requests)==2:
                     name='write';args={'file_path':'response.json','content':'{"note":"Unadmitted local tool checkpoint"}'}
                 else:name=None
@@ -145,6 +168,9 @@ class InstalledRuntimeTests(unittest.TestCase):
                 rp=Path(result['receipt']);receipt=json.loads(rp.read_bytes());self.assertTrue(receipt['process_reaped']);self.assertTrue(receipt['outcome_known'])
                 _verify_receipt_files(rp,receipt)
                 names={t['function']['name'] for t in requests[0]['tools']};self.assertIn('research_tool',names);self.assertNotIn('bash',names)
+                signature=next(t['function']['parameters'] for t in requests[0]['tools'] if t['function']['name']=='research_run')
+                self.assertEqual(set(signature['required']),{'source','input','purpose','expected'})
+                self.assertIn('JSON object',signature['properties']['source']['description'])
                 self.assertIn('receipt_ref',json.dumps(requests[1]['messages']))
         finally:server.shutdown();server.server_close();thread.join()
     def test_installed_native_controller_roundtrip(self):self.exercise()

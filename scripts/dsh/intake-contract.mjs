@@ -68,7 +68,7 @@ export function createPolicy(manifest, check) {
     if (!nativeTools(manifest.mode).includes(exec.name))
       return 'Tool is outside the declared native interface: ' + exec.name;
     if (['read', 'read_image', 'inspect_workspace'].includes(exec.name)) return;
-    if (exec.name === 'research_tool' || exec.name === (manifest.mode==='research_work' ? 'review_response' : 'validate_response')) return;
+    if (['research_tool','research_run'].includes(exec.name) || exec.name === (manifest.mode==='research_work' ? 'review_response' : 'validate_response')) return;
     if (manifest.mode === 'research_work' && ['write', 'edit'].includes(exec.name)) {
       if (!ownedFile(exec.arguments.file_path)) return 'Research files must remain in the owning workspace';
       if (resolve(manifest.workspace, exec.arguments.file_path ?? '') !== output) return;
@@ -98,11 +98,11 @@ export function createPolicy(manifest, check) {
 
 export function apply(ctx, config) {
   const manifest = JSON.parse(readFileSync(process.env.SCISAURUS_TASK_CONTRACT, 'utf8'));
-  function check(document) {
+  function check(document, action) {
     try {
       return JSON.parse(execFileSync(config.python, [config.checker, config.bundle], {
         input: JSON.stringify({ assignment: manifest.assignment,
-          assignment_sha256: manifest.inputs[manifest.assignment], document }),
+          assignment_sha256: manifest.inputs[manifest.assignment], ...(action ? { action } : { document }) }),
         encoding: 'utf8', timeout: 30000, maxBuffer: 1024 * 1024,
       }));
     } catch (error) {
@@ -117,13 +117,14 @@ export function apply(ctx, config) {
   });
   if (manifest.mode === 'research_work') {
     const assignment = JSON.parse(readFileSync(manifest.assignment, 'utf8'));
-    ctx.tools.register({ name: 'research_tool', description: interfaceSpec.controller_description,
-      parameters: { type: 'object', additionalProperties: false, required: ['operation', 'arguments'],
-        properties: { operation: { type: 'string', enum: Object.keys(assignment.scientific_software_tools.actions) },
-          arguments: { type: 'object', additionalProperties: true } } },
+    function registerController(name, parameters, actionFor, description) {
+      ctx.tools.register({ name, description, parameters,
       output: { schema: { type: 'object', additionalProperties: true },
         render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
-      async execute(action, exec) {
+      async execute(args, exec) {
+        const action = actionFor(args);
+        if (name === 'research_tool' && action.operation === 'run') throw new Error('Use research_run with its explicit computation fields');
+        check(undefined, action);
         const bridge = manifest.controller_bridge;
         if (!bridge) throw new Error('Native controller tool has no owning execution channel');
         const callId = String(exec.callId), sessionId = String(exec.agent.id);
@@ -145,7 +146,14 @@ export function apply(ctx, config) {
         }
         throw new Error('Native controller tool reached the owning attempt deadline');
       },
-    });
+      });
+    }
+    registerController('research_tool', { type: 'object', additionalProperties: false, required: ['operation', 'arguments'],
+      properties: { operation: { type: 'string', enum: Object.keys(assignment.scientific_software_tools.actions).filter(x => x !== 'run') },
+        arguments: { type: 'object', additionalProperties: true } } }, args => args, interfaceSpec.controller_description);
+    registerController('research_run', assignment.scientific_software_tools.native_arguments_schema.run,
+      args => ({ operation: 'run', arguments: args }),
+      'Execute complete source in exactly one declared runtime or acquired environment. Mandatory source/input/purpose/expected fields and JSON stdout format are specified in this tool schema. Supply input={} and expected=null when appropriate. Returns the full actual receipt; execution is not scientific validation.');
   }
   ctx.tools.register({ name: 'inspect_workspace',
     description: 'List the current writable workspace and check whether response.json exists. An absent response is normal before publication; this does not read file contents.',

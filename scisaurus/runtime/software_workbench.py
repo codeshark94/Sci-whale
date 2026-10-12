@@ -54,9 +54,60 @@ _MEDIA_TOKEN = r"[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}"
 _MEDIA_TYPE = re.compile(_MEDIA_TOKEN + r"/" + _MEDIA_TOKEN + r"\Z")
 
 
+def run_arguments_schema():
+    expected={"type":"object","additionalProperties":False,
+        "required":["value","absolute_tolerance","relative_tolerance"],"properties":{
+            "value":{"type":"object","additionalProperties":True},
+            "absolute_tolerance":{"type":"number","description":"Finite nonnegative tolerance."},
+            "relative_tolerance":{"type":"number","description":"Finite nonnegative tolerance."}}}
+    def artifact(required,optional):
+        return {"type":"object","additionalProperties":False,"required":list(required),
+            "properties":{name:{"type":"string"} for name in (*required,*optional)}}
+    return {"type":"object","additionalProperties":False,
+        "required":["source","input","purpose","expected"],"properties":{
+            "source":{"type":"string","description":"Complete Python/R source. Read JSON input from stdin if needed. Print exactly one JSON object to stdout; send explanatory text to stderr."},
+            "input":{"type":"object","additionalProperties":True,"description":"Explicit JSON input; supply {} for a self-contained program."},
+            "purpose":{"type":"string","enum":["upstream_example","scientific_computation"]},
+            "expected":{"oneOf":[{"type":"null"},expected],
+                "description":"Supply null for a new computation without a declared reference. Upstream reproduction requires a reference and tolerances."},
+            "runtime":{"oneOf":[{"type":"string"},{"type":"null"}],"description":"Declared laboratory runtime label; use exactly one of runtime or environment_ref."},
+            "environment_ref":{"oneOf":[{"type":"string"},{"type":"null"}]},
+            "documentation_refs":{"oneOf":[{"type":"array","items":{"type":"string"}},{"type":"null"}]},
+            "inputs":{"oneOf":[{"type":"array","items":artifact(DECLARED_INPUT_FIELDS,DECLARED_INPUT_OPTIONAL)},{"type":"null"}]},
+            "outputs":{"oneOf":[{"type":"array","items":artifact(DECLARED_OUTPUT_FIELDS,DECLARED_OUTPUT_OPTIONAL)},{"type":"null"}]}}}
+
+
+def validate_run_arguments(args):
+    schema=run_arguments_schema()
+    _fields(args,set(schema['required']),set(schema['properties'])-set(schema['required']))
+    if (args.get('runtime') is None)==(args.get('environment_ref') is None):
+        raise ValidationError('software run requires exactly one of environment_ref or runtime')
+    if not isinstance(args['source'],str) or not args['source'].strip() or not isinstance(args['input'],dict):
+        raise ValidationError('software run requires complete source and JSON object input')
+    if args['purpose'] not in {'upstream_example','scientific_computation'}:
+        raise ValidationError('software run must declare example reproduction or scientific computation')
+    if args['expected'] is not None:validate_expected(args['expected'])
+    for name,required,optional in (('inputs',DECLARED_INPUT_FIELDS,DECLARED_INPUT_OPTIONAL),
+                                   ('outputs',DECLARED_OUTPUT_FIELDS,DECLARED_OUTPUT_OPTIONAL)):
+        rows=args.get(name)
+        if rows is None:continue
+        if not isinstance(rows,list):raise ValidationError('software run '+name+' must be a list')
+        for row in rows:_fields(row,set(required),set(optional))
+    if args['purpose']=='upstream_example' and args['expected'] is None:
+        raise ValidationError('upstream_example requires a documented expected output and tolerances before execution; use scientific_computation for a new output without an upstream comparison')
+
+
+def validate_expected(expected):
+    _fields(expected,{'value','absolute_tolerance','relative_tolerance'})
+    if not isinstance(expected['value'],dict) or any(type(expected[k]) not in (int,float)
+            or not math.isfinite(expected[k]) or expected[k]<0 for k in ('absolute_tolerance','relative_tolerance')):
+        raise ValidationError('upstream expected output needs finite nonnegative tolerances')
+
+
 def tool_contract():
     return {
         "revision": REVISION,
+        "native_arguments_schema":{"run":run_arguments_schema()},
         "response": {"tool_action": {"operation": "check_environment | list_runtimes | inspect_runtime | read_receipt | search_evidence | read_evidence | search_web | fetch_source | search | inspect | list_files | read | acquire | run", "arguments": {}}},
         "actions": {
             "check_environment": {},
@@ -1236,19 +1287,8 @@ class SoftwareWorkbench:
         return tuple(dict.fromkeys(roots))
 
     def _run(self, args, key):
-        _fields(args, {"source", "input", "purpose", "expected"},
-                {"environment_ref", "runtime", "documentation_refs", "inputs", "outputs"})
+        validate_run_arguments(args)
         runtime_label, environment_ref = args.get("runtime"), args.get("environment_ref")
-        if (runtime_label is None) == (environment_ref is None):
-            raise ValidationError("software run requires exactly one of environment_ref or runtime")
-        if not isinstance(args["source"], str) or not args["source"].strip() or not isinstance(args["input"], dict):
-            raise ValidationError("software run requires complete source and JSON object input")
-        if args["purpose"] not in {"upstream_example", "scientific_computation"}:
-            raise ValidationError("software run must declare example reproduction or scientific computation")
-        if args["expected"] is not None and not isinstance(args["expected"], dict):
-            raise ValidationError("expected upstream output must be a JSON object or null")
-        if args["purpose"] == "upstream_example" and args["expected"] is None:
-            raise ValidationError("upstream_example requires a documented expected output and tolerances before execution; use scientific_computation for a new output without an upstream comparison")
         limits = self._effective_limits()
         declared_inputs = self._declared_inputs(args.get("inputs"), limits)
         declared_outputs = self._declared_outputs(args.get("outputs"), limits)
@@ -1380,10 +1420,7 @@ class SoftwareExecutionError(ValidationError):
 
 
 def _matches_expected(output, expected):
-    _fields(expected, {"value", "absolute_tolerance", "relative_tolerance"})
-    if not isinstance(expected["value"], dict) or any(type(expected[key]) not in (int, float) or not math.isfinite(expected[key]) or expected[key] < 0
-                                                        for key in ("absolute_tolerance", "relative_tolerance")):
-        raise ValidationError("upstream expected output needs finite nonnegative tolerances")
+    validate_expected(expected)
     def equal(actual, reference):
         if type(actual) in (int, float) and type(reference) in (int, float):
             return math.isfinite(actual) and math.isfinite(reference) and math.isclose(actual, reference, abs_tol=expected["absolute_tolerance"], rel_tol=expected["relative_tolerance"])

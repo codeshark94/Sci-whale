@@ -184,7 +184,7 @@ try{
  // Global extras reproduce the previous presentation surface without running them.
  for(const name of ['bash','todo_write','subagent','read_image'])ctx.tools.register({name,description:name,parameters:{},
    output:{schema:{type:'string'},render:(_a,v)=>[{type:'text',text:v}]},execute(){throw Error('unexpected extra tool body');}});
- const input=join(dir,'assignment.json');const assignment='{"research_work":{"kind":"research_work"},"scientific_software_tools":{"actions":{"check_environment":{}}}}';writeFileSync(input,assignment);
+ const input=join(dir,'assignment.json');const assignment=JSON.stringify({research_work:{kind:'research_work'},scientific_software_tools:{actions:{check_environment:{},run:{}},native_arguments_schema:{run:RUN_SCHEMA}}});writeFileSync(input,assignment);
  const manifest=join(dir,'manifest.json');writeFileSync(manifest,JSON.stringify({workspace:dir,output:join(dir,'response.json'),
    assignment:input,inputs:{[input]:createHash('sha256').update(assignment).digest('hex')},input_delivery:'inline',mode:'research_work'}));
  process.env.SCISAURUS_TASK_CONTRACT=manifest;await ctx.plugin(Intake,CHECKER_CONFIG);
@@ -193,7 +193,11 @@ try{
  ctx.emit('agent/created',{agent});
  const advertised=ctx.tools.schemas(agent).map(x=>x.name).sort();
  assert.deepEqual(advertised,Intake.nativeTools('research_work').sort());
+ const runSchema=ctx.tools.schemas(agent).find(x=>x.name==='research_run').parameters;
+ assert.deepEqual(runSchema.required,['source','input','purpose','expected']);
  let counter=0;async function call(name,args){return ctx.tools.execute({agent,name,arguments:args,callId:'offline-'+(++counter),signal:new AbortController().signal});}
+ let rejected=await call('research_run',{source:'print(1)',purpose:'scientific_computation',runtime:'runtime'});
+ assert.equal(rejected.isError,true);assert.match(JSON.stringify(rejected),/input|expected/);
  let result=await call('inspect_workspace',{});assert.equal(result.isError,false);assert.equal(result.value.response_exists,false);
  result=await call('write',{file_path:join(dir,'pilot/source.py'),content:'value = 1\n'});assert.equal(result.isError,false,JSON.stringify(result));
  result=await call('read',{file_path:join(dir,'pilot/source.py')});assert.equal(result.isError,false);
@@ -217,7 +221,8 @@ try{
             composition=root/'composition.json';composition.write_text('[]')
             backend=guard_backend({'composition':str(composition),'read_roots':[],'pinned_files':{}},
                 root/'sealed',sys.executable,work_mode=True)
-            code=code.replace('CHECKER_CONFIG',json.dumps(guarded_backend(backend))).replace('WORKSPACE',json.dumps(str(work)))
+            from scisaurus.runtime.software_workbench import run_arguments_schema
+            code=code.replace('CHECKER_CONFIG',json.dumps(guarded_backend(backend))).replace('WORKSPACE',json.dumps(str(work))).replace('RUN_SCHEMA',json.dumps(run_arguments_schema()))
             command=[node,'--input-type=module','-e',code]
             profile=sandbox_profile(work,[node],allow_network=False,temporary_workspace=temporary,
                 read_only_paths=[str(dsh.parent),str(root/'sealed'),str(Path(sys.executable).resolve().parent.parent),
@@ -234,7 +239,7 @@ try{
 import {mkdtempSync,writeFileSync,rmSync,realpathSync,symlinkSync} from 'node:fs';import {tmpdir} from 'node:os';
 import {join} from 'node:path';import {createHash} from 'node:crypto';import assert from 'node:assert/strict';
 const {createPolicy,apply,nativeTools}=await import(PLUGIN);const dir=realpathSync(mkdtempSync(join(tmpdir(),'primary-work-')));
-try{const path=join(dir,'assignment.json');const raw=JSON.stringify({research_work:{kind:'research_work'},scientific_software_tools:{actions:{check_environment:{}}}});
+try{const path=join(dir,'assignment.json');const raw=JSON.stringify({research_work:{kind:'research_work'},scientific_software_tools:{actions:{check_environment:{},run:{}},native_arguments_schema:{run:RUN_SCHEMA}}});
 writeFileSync(path,raw);const manifest={workspace:dir,output:join(dir,'response.json'),assignment:path,
  inputs:{[path]:createHash('sha256').update(raw).digest('hex')},input_delivery:'inline',mode:'research_work'};
 const policy=createPolicy(manifest,JSON.parse);const agent={};
@@ -261,5 +266,7 @@ symlinkSync(manifest.output,join(dir,'alias'));
 assert.match(policy.guard({name:'write',agent,arguments:{file_path:join(dir,'alias'),content:'invalid'}}),/owning workspace/);
 }finally{rmSync(dir,{recursive:true});}
 '''.replace('PLUGIN',json.dumps(plugin))
+        from scisaurus.runtime.software_workbench import run_arguments_schema
+        code=code.replace('RUN_SCHEMA',json.dumps(run_arguments_schema()))
         result=subprocess.run([node,'--input-type=module','-e',code],text=True,capture_output=True)
         self.assertEqual(result.returncode,0,result.stderr)

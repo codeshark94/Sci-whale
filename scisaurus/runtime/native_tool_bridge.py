@@ -10,6 +10,7 @@ from scisaurus.runtime.run_control import ensure_run_allowed
 
 METHOD = 'scisaurus/research-tool'
 TOOL = 'research_tool'
+RUN_TOOL = 'research_run'
 
 
 class NativeToolBridge:
@@ -30,11 +31,12 @@ class NativeToolBridge:
             return
         event = params.get('event', {})
         data = event.get('data', {})
-        if event.get('type') == 'tool/call' and data.get('name') == TOOL:
+        if event.get('type') == 'tool/call' and data.get('name') in {TOOL,RUN_TOOL}:
             identity = data['callId']
             if identity in self.calls:
                 raise ValidationError('native tool call identity was repeated')
-            self.calls[identity] = json.loads(data['arguments'])
+            action=json.loads(data['arguments'])
+            self.calls[identity] = {'operation':'run','arguments':action} if data['name']==RUN_TOOL else action
 
     def respond(self, payload):
         if self.failed:

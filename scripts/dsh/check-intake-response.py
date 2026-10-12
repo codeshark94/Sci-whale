@@ -12,7 +12,14 @@ def main():
     raw = Path(value['assignment']).read_bytes()
     if hashlib.sha256(raw).hexdigest() != value['assignment_sha256']:
         raise ValueError('sealed assignment changed')
-    validate_response(delivered_assignment(value['assignment']), strict_document(value['document']))
+    assignment=delivered_assignment(value['assignment'])
+    if 'action' in value:
+        from scisaurus.runtime.primary_work import validate_native_action
+        from scisaurus.core.schema import canonical_bytes
+        validate_native_action(assignment,value['action'])
+        print(json.dumps({'validated':True,'sha256':hashlib.sha256(canonical_bytes(value['action'])).hexdigest()}))
+        return
+    validate_response(assignment, strict_document(value['document']))
     print(json.dumps({'validated': True,
         'sha256': hashlib.sha256(value['document'].encode('utf-8')).hexdigest()}))
 

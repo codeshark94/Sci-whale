@@ -55,8 +55,8 @@ def work_request(context):
 
 def work_assignment(original,request):
     tools=tool_contract();tools['actions'].pop('acquire');tools.pop('response')
-    tools['native_tool']='research_tool'
-    tools['rules']=['Call research_tool directly. Read actual observations before continuing; a successful tool is not scientific admission.']
+    tools['native_tools']={'run':'research_run','other_operations':'research_tool'}
+    tools['rules']=['Call research_run for computation and research_tool for other operations. Read actual observations before continuing; a successful tool is not scientific admission.']
     retired={'phase','output_contract','scientific_software_tools','execution_step','transport_feedback',
         'structured_output_policy','structured_continuation','concept_invention','invention_review',
         'invention_process','literature_acquisition'}
@@ -77,7 +77,10 @@ def validate_native_action(assignment,action):
             or action['operation'] not in assignment['scientific_software_tools']['actions']
             or not isinstance(action['arguments'],dict)):
         raise ValidationError('research tool request differs from its declared interface')
-    if action['operation']!='run':validate_readonly_action(action)
+    if action['operation']=='run':
+        from scisaurus.runtime.software_workbench import validate_run_arguments
+        validate_run_arguments(action['arguments'])
+    else:validate_readonly_action(action)
 
 
 def review_feedback(response):

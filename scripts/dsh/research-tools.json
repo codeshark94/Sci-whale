@@ -1,15 +1,16 @@
 {
-  "work_tools": ["read", "read_image", "write", "edit", "inspect_workspace", "research_tool", "review_response"],
+  "work_tools": ["read", "read_image", "write", "edit", "inspect_workspace", "research_tool", "research_run", "review_response"],
   "intake_tools": ["read", "write", "inspect_workspace", "validate_response"],
-  "controller_description": "Execute one declared controller operation and return its actual receipt-bound observation. Use check_environment, list_runtimes or inspect_runtime for runtime discovery, and run for source-code computation in a declared runtime. Operation arguments are specified in assignment.json scientific_software_tools.actions. This executes tools only; it does not create another author or establish scientific validity.",
+  "controller_description": "Execute one declared discovery/inspection controller operation and return its actual receipt-bound observation. Use check_environment, list_runtimes or inspect_runtime for runtime discovery. Use the separate research_run tool for source-code computation. Arguments are specified in assignment.json scientific_software_tools.actions. This executes tools only; it does not create another author or establish scientific validity.",
   "work_instructions": [
     "Continue the same research session and complete one development checkpoint on the current question.",
     "The current native tool definitions are authoritative; preserve historical evidence without reusing historical tool interfaces.",
     "Complete current inputs are delivered inline; read files only when useful. You own research choices, design, code and interpretation.",
     "Use read/write/edit for research files inside the writable workspace and inspect_workspace for directory and output existence checks. No shell tool is available.",
-    "Use the native research_tool directly for computation and external observations, with operation and arguments from scientific_software_tools.actions. Use check_environment, list_runtimes or inspect_runtime to inspect a runtime, then run to execute complete source code in the selected declared runtime. Do not probe runtime paths with shell commands.",
-    "Each research_tool returns the actual controller observation in the same session. Read that result before choosing subsequent work. Never retry a failed operation or delegate authorship.",
-    "Finish by writing response.json as a complete, nonempty JSON object containing research notes and the observed progress. Its initial state is absent. Do not encode tool requests in response.json; call research_tool instead.",
+    "Use research_tool for discovery and inspection, with operation and arguments from scientific_software_tools.actions. Use check_environment, list_runtimes or inspect_runtime to inspect a runtime. Do not probe runtime paths with shell commands.",
+    "Execute complete source code with research_run, supplying its mandatory source, input, purpose and expected fields. Supply input={} for self-contained code and expected=null for a new computation without a reference. Select exactly one declared runtime or environment_ref. The program must print exactly one JSON object to stdout; send explanatory text to stderr.",
+    "Native controller tools return the actual observation in the same session. Read that result before choosing subsequent work. Never retry a failed operation or delegate authorship.",
+    "Finish by writing response.json as a complete, nonempty JSON object containing research notes and the observed progress. Its initial state is absent. Do not encode tool requests in response.json; call the native controller tools instead.",
     "Notes have no prescribed scientific fields. review_response is optional interface feedback, not scientific validation. A successful tool is not a scientific verdict.",
     "Stop on the first operational error. Preserve the current question, previous failures and historical usage; do not start another topic."
   ]
