@@ -32,7 +32,7 @@ def sha(body):
     return hashlib.sha256(body).hexdigest()
 
 
-def preflight(root, runtime_python):
+def preflight(root, runtime_python, *, continuation=None):
     root = Path(root).resolve()
     pointer = json.loads((root / "preparation.json").read_bytes())
     checkpoint_path = Path(pointer["checkpoint_path"]).resolve()
@@ -45,19 +45,43 @@ def preflight(root, runtime_python):
     project = root / "composer"
     if checkpoint["mission_id"] != root.name or checkpoint["development_session"] != development_session_binding(project):
         raise StateError("intake belongs to another project")
+    ticket = None
+    if continuation is not None:
+        ticket_path = Path(continuation).resolve()
+        ticket_raw = ticket_path.read_bytes()
+        ticket = json.loads(ticket_raw)
+        if (not ticket_path.is_relative_to(project / "intake-controller/recoveries")
+                or ticket_path.stem != sha(ticket_raw)
+                or ticket.get("schema_version") != "explicit-intake-continuation-1"
+                or ticket.get("preparation_sha256") != sha(raw)
+                or ticket.get("session_id") != checkpoint["session_id"]
+                or ticket.get("development_session") != checkpoint["development_session"]
+                or sha((project / "output/run-control.json").read_bytes()) != ticket["control_sha256"]
+                or sha(Path(ticket["backend_binding"]).read_bytes()) != ticket["backend_binding_sha256"]):
+            raise StateError("intake continuation lost its sealed owner or stopped control")
     for name, expected in checkpoint["input_sha256"].items():
+        if ticket and name == "composer/output/run-control.json":
+            continue
         path = root / name
         if not path.resolve().is_relative_to(root) or path.is_symlink() or sha(path.read_bytes()) != expected:
             raise StateError("sealed intake input changed: " + name)
     state_raw = (project / "development-session/session.json").read_bytes()
     state = json.loads(state_raw)
-    if (sha(state_raw) != checkpoint["session_initial_sha256"] or state["session_id"] != checkpoint["session_id"]
-            or state["binding"] != checkpoint["development_session"] or state["calls"] or state["active_job"]):
+    expected_state = ticket["session_sha256"] if ticket else checkpoint["session_initial_sha256"]
+    if (sha(state_raw) != expected_state or state["session_id"] != checkpoint["session_id"]
+            or state["binding"] != checkpoint["development_session"] or state["active_job"]
+            or not ticket and state["calls"]):
         raise StateError("first intake step requires its unused reserved session")
-    backend = validate_batch_config(json.loads((root / "backend.json").read_bytes()))
+    backend = validate_batch_config(ticket["backend"] if ticket else json.loads((root / "backend.json").read_bytes()))
     verify_batch_runtime(backend)
     if state["config_sha256"] != sha(canonical_bytes(backend)):
         raise StateError("intake backend differs from its reserved session")
+    if ticket:
+        with DevelopmentSession(checkpoint["development_session"]).lease(backend, time.monotonic() + 2) as session:
+            if (not session.state["calls"] or session.state["calls"][-1]["sha256"] != ticket["receipt_sha256"]
+                    or not session._reconciled_unknown(session.state["calls"][-1], json.loads(
+                        Path(session.state["calls"][-1]["receipt"]).read_bytes()))):
+                raise StateError("intake continuation requires its exact accounted unknown")
     if not Path(runtime_python).is_file():
         raise StateError("intake requires an installed Python runtime")
     assignment = json.loads((root / "inputs/assignment.json").read_bytes())
@@ -155,9 +179,12 @@ def validate_proposal(value, assignment):
         raise ValidationError("topic selection has an inconsistent candidate identity")
 
 
-def run_once(root, runtime_python, *, recovery=None):
+def run_once(root, runtime_python, *, recovery=None, continuation=None):
     recovery = recovery_evidence(recovery)
-    root, checkpoint, backend, assignment, protected = preflight(root, runtime_python)
+    root, checkpoint, backend, assignment, protected = preflight(root, runtime_python, continuation=continuation)
+    if continuation:
+        ticket = json.loads(Path(continuation).read_bytes())
+        assignment["transport_feedback"] = ticket["feedback"]
     actions = assignment["scientific_software_tools"]["actions"]
     for name in ("acquire", "run"):
         actions.pop(name, None)
@@ -175,14 +202,14 @@ def run_once(root, runtime_python, *, recovery=None):
     output = project / "output"
     directory = project / "intake-controller"
     directory.mkdir(exist_ok=True)
-    attempt = directory / "attempt.json"
+    attempt = (Path(continuation).with_suffix(".attempt.json") if continuation else directory / "attempt.json")
     generation = uuid.uuid4().hex
     # The marker and launch permission are acquired before any provider request.
     with control_lock(output):
         if attempt.exists():
             raise StateError("intake attempt already exists; no automatic retry is permitted")
         control = read_control(output)
-        if control.get("stop_requested") is not True or control.get("generation"):
+        if control.get("stop_requested") is not True or not continuation and control.get("generation"):
             raise StateError("intake requires its stopped, ungranted control")
         record = {"schema_version": "fresh-intake-attempt-1", "mission_id": root.name,
             "session_id": checkpoint["session_id"], "preparation_sha256": sha(canonical_bytes(checkpoint)),
@@ -196,13 +223,17 @@ def run_once(root, runtime_python, *, recovery=None):
     os.environ.update(dict(zip(names, (str(output / "run-control.json"), generation))))
     deadline = time.monotonic() + backend["timeout_seconds"]
     try:
-        backend, binding = strict_backend(root, checkpoint, backend)
-        DevelopmentSession(checkpoint["development_session"]).bind_unused_backend(backend,
-            expected_state_sha256=checkpoint["session_initial_sha256"], binding_ref=binding)
+        if continuation:
+            binding = ticket["backend_binding"]
+        else:
+            backend, binding = strict_backend(root, checkpoint, backend)
+            DevelopmentSession(checkpoint["development_session"]).bind_unused_backend(backend,
+                expected_state_sha256=checkpoint["session_initial_sha256"], binding_ref=binding)
         record["backend_binding"] = str(binding)
         client = IntakePrimaryClient(backend, root=project / "intake-jobs",
             runtime_python=runtime_python, development_session=checkpoint["development_session"],
-            isolated_from=protected, required_startup_marker=FAILURE_POLICY_READY)
+            isolated_from=protected, required_startup_marker=FAILURE_POLICY_READY,
+            forbid_reasoning=bool(continuation))
         client.deadline = deadline
         result = client.complete(system=(root / "inputs/system-contract.txt").read_text(), prompt=json.dumps(assignment))
         record.update(receipt=result.response_metadata["receipt"], usage=result.usage)

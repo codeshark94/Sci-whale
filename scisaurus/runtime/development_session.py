@@ -133,8 +133,7 @@ class DevelopmentSession:
                         raise ValidationError("development session owner or backend changed")
                     if self.state.get("active_job"):
                         raise ValidationError("development session has an unsettled dispatch")
-                    if self.state.get("pre_dispatch_binding"):
-                        self._verify_unused_backend_binding(self.state)
+                    versions = self._verify_backend_lineage(self.state)
                     for index, call in enumerate(self.state["calls"]):
                         receipt_path = Path(call["receipt"]).resolve()
                         body = receipt_path.read_bytes()
@@ -146,7 +145,8 @@ class DevelopmentSession:
                                 or owner.get("binding") != self.binding
                                 or owner.get("prior_receipts") != self.state["calls"][:index]
                                 or receipt.get("session_id") != self.state["session_id"]
-                                or receipt.get("config_sha256") != digest
+                                or receipt.get("config_sha256") != next((key for key, boundary in reversed(list(versions.items()))
+                                    if index >= boundary), None)
                                 or not receipt.get("process_reaped")
                                 or not (receipt.get("status") == "completed"
                                     or receipt.get("status") == "failed" and receipt.get("outcome_known") is True
@@ -183,6 +183,9 @@ class DevelopmentSession:
                     or proof.get("config_sha256") != receipt.get("config_sha256")
                     or proof.get("disposition") != "paid_unknown_history_only"):
                 raise ValidationError("development unknown history lost its reconciliation proof")
+            if proof.get("billing_completeness") == "partial_unfinalized" and (
+                    proof.get("charged_usage") != receipt.get("usage") or call.get("usage") != receipt.get("usage")):
+                raise ValidationError("development partial accounting differs from its paid receipt")
             for ref, expected in proof["evidence"].items():
                 record = store.get(ref)
                 if (record["body_hash"] != expected
@@ -406,6 +409,170 @@ class DevelopmentSession:
             self.state["active_job"] = None
             self.save()
             return record
+
+    def reconcile_stopped_attempt(self, config, store, *, attempt_path, receipt_sha256):
+        """Retain reported partial charges and release only an exactly owned reaped intake."""
+        project = Path(self.binding["project_id"])
+        if Path(store.control.dir).resolve() != project:
+            raise ValidationError("attempt accounting belongs to another project")
+        with (self.root / "owner.lock").open("a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.state = json.loads(self.path.read_bytes())
+            attempt_path = Path(attempt_path).resolve()
+            attempt_raw = attempt_path.read_bytes()
+            attempt = json.loads(attempt_raw)
+            sealed = attempt_path.parent / (hashlib.sha256(attempt_raw).hexdigest() + ".json")
+            path = Path(attempt.get("receipt", "")).resolve()
+            raw = path.read_bytes()
+            receipt = json.loads(raw)
+            digest = hashlib.sha256(canonical_bytes(config)).hexdigest()
+            usage = receipt.get("usage", {})
+            if attempt.get("preparation_sha256"):
+                mission = project.parent
+                pointer = json.loads((mission / "preparation.json").read_bytes())
+                checkpoint_path = Path(pointer["checkpoint_path"]).resolve()
+                checkpoint_raw = checkpoint_path.read_bytes()
+                checkpoint = json.loads(checkpoint_raw)
+                backend_proof_path = Path(attempt["backend_binding"]).resolve()
+                backend_proof = json.loads(backend_proof_path.read_bytes())
+                if (not checkpoint_path.is_relative_to(mission / "checkpoints")
+                        or hashlib.sha256(checkpoint_raw).hexdigest() != attempt["preparation_sha256"]
+                        or pointer["checkpoint_sha256"] != attempt["preparation_sha256"]
+                        or checkpoint["development_session"] != self.binding
+                        or checkpoint["session_id"] != self.state["session_id"]
+                        or not backend_proof_path.is_relative_to(project / "intake-controller")
+                        or backend_proof.get("backend_sha256") != digest
+                        or backend_proof.get("development_session") != self.binding
+                        or backend_proof.get("session_id") != self.state["session_id"]
+                        or hashlib.sha256(canonical_bytes(backend_proof["backend"])).hexdigest() != digest):
+                    raise ValidationError("stopped attempt lost its sealed preparation or backend")
+            if (not attempt_path.is_relative_to(project / "intake-controller")
+                    or sealed.read_bytes() != attempt_raw
+                    or attempt.get("schema_version") != "fresh-intake-attempt-1"
+                    or attempt.get("status") != "stopped_on_error"
+                    or attempt.get("scientific_admission") != "not_assessed"
+                    or attempt.get("session_id") != self.state["session_id"]
+                    or attempt.get("usage") != usage
+                    or self.state.get("binding") != self.binding
+                    or self.state.get("config_sha256") != digest
+                    or not path.is_relative_to(project / "intake-jobs")
+                    or hashlib.sha256(raw).hexdigest() != receipt_sha256
+                    or receipt.get("status") != "result_unknown"
+                    or receipt.get("outcome_known") is True
+                    or receipt.get("process_reaped") is not True
+                    or receipt.get("job_directory") != str(path.parent)
+                    or receipt.get("session_id") != self.state["session_id"]
+                    or receipt.get("config_sha256") != digest
+                    or receipt.get("development_session", {}).get("binding") != self.binding
+                    or not {"model_calls", "input_tokens", "output_tokens"}.issubset(usage)
+                    or any(type(v) is not int or v < 0 for v in usage.values())
+                    or receipt.get("input_sha256", {}).get("assignment.json") != hashlib.sha256(
+                        (path.parent / "input/assignment.json").read_bytes()).hexdigest()):
+                raise ValidationError("stopped attempt lacks exact paid ownership")
+            prior = next((c for c in self.state["calls"] if c["sha256"] == receipt_sha256), None)
+            if self.state.get("active_job") is None and prior and self._reconciled_unknown(prior, receipt):
+                return store.get(prior["reconciliation_ref"])
+            if (self.state.get("active_job") != str(path)
+                    or receipt.get("development_session", {}).get("prior_receipts") != self.state["calls"]):
+                raise ValidationError("stopped attempt lost its active dispatch owner")
+            _verify_receipt_files(path, receipt)
+            try:
+                os.kill(receipt["pid"], 0)
+            except ProcessLookupError:
+                pass
+            else:
+                raise ValidationError("stopped attempt process is still alive")
+            accounting = {"schema_version": "stopped-attempt-accounting-1", "binding": self.binding,
+                "attempt_sha256": hashlib.sha256(attempt_raw).hexdigest(), "attempt": attempt,
+                "receipt_sha256": receipt_sha256, "reported_usage": usage,
+                "billing_completeness": "partial_unfinalized", "scientific_outcome": "unknown"}
+            evidence_id = "command/stopped-attempt-accounting/" + receipt_sha256
+            evidence = store.head(evidence_id) or store.publish_artifact(logical_id=evidence_id,
+                artifact_type="note", author="command.recovery", body=canonical_bytes(accounting),
+                media_type="application/json")
+            if store.read_body(evidence["body_hash"]) != canonical_bytes(accounting):
+                raise ValidationError("stopped attempt accounting changed")
+            proof = {"schema_version": "development-dispatch-reconciliation-1", "binding": self.binding,
+                "receipt": str(path), "receipt_sha256": receipt_sha256, "session_id": receipt["session_id"],
+                "config_sha256": digest, "evidence": {evidence["artifact_ref"]: evidence["body_hash"]},
+                "charged_usage": usage, "billing_completeness": "partial_unfinalized",
+                "disposition": "paid_unknown_history_only"}
+            logical = "command/development-dispatch-reconciliations/" + receipt_sha256
+            record = store.head(logical) or store.publish_artifact(logical_id=logical, artifact_type="note",
+                author="command.recovery", body=canonical_bytes(proof), media_type="application/json",
+                inputs=[{"ref": evidence["artifact_ref"], "purpose": "subject"}])
+            if store.read_body(record["body_hash"]) != canonical_bytes(proof):
+                raise ValidationError("stopped attempt reconciliation changed")
+            self.state["calls"].append({"receipt": str(path), "sha256": receipt_sha256,
+                "usage": usage, "reconciliation_ref": record["artifact_ref"]})
+            self.state["active_job"] = None
+            self.save()
+            return record
+
+    def bind_recovered_backend(self, config, *, expected_state_sha256, binding_ref):
+        """Append a sealed transport revision while preserving prior configuration ownership."""
+        with (self.root / "owner.lock").open("a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            raw = self.path.read_bytes()
+            state = json.loads(raw)
+            if (hashlib.sha256(raw).hexdigest() != expected_state_sha256
+                    or state.get("binding") != self.binding or state.get("active_job")
+                    or not state.get("calls")):
+                raise ValidationError("backend recovery requires its exact settled session")
+            self._verify_backend_lineage(state)
+            digest = hashlib.sha256(canonical_bytes(config)).hexdigest()
+            reference = {"path": str(Path(binding_ref).resolve()),
+                "sha256": hashlib.sha256(Path(binding_ref).read_bytes()).hexdigest()}
+            state.setdefault("backend_revisions", []).append(reference)
+            state["config_sha256"] = digest
+            self._verify_backend_lineage(state)
+            self.state = state
+            self.save()
+
+    def _verify_backend_lineage(self, state):
+        initial = deepcopy(state)
+        revisions = state.get("backend_revisions", [])
+        if revisions:
+            first = json.loads(Path(revisions[0]["path"]).read_bytes())
+            initial["config_sha256"] = first["previous_config_sha256"]
+        if initial.get("pre_dispatch_binding"):
+            self._verify_unused_backend_binding(initial)
+        digest = initial["config_sha256"]
+        allowed = {digest: 0}
+        for reference in revisions:
+            path = Path(reference["path"]).resolve()
+            raw = path.read_bytes()
+            proof = json.loads(raw)
+            snapshot = Path(proof["previous_session"])
+            prior_raw = snapshot.read_bytes()
+            prior = json.loads(prior_raw)
+            next_digest = hashlib.sha256(canonical_bytes(proof["backend"])).hexdigest()
+            old_backend = proof["previous_backend"]
+            if (hashlib.sha256(canonical_bytes(old_backend)).hexdigest() != digest
+                    or any(old_backend.get(key) != proof["backend"].get(key) for key in
+                           set(old_backend) | set(proof["backend"])
+                           if key not in {"composition", "read_roots", "pinned_files"})):
+                raise ValidationError("backend recovery may revise transport configuration only")
+            boundary = len(prior["calls"])
+            if (not path.is_relative_to(Path(self.binding["project_id"]))
+                    or hashlib.sha256(raw).hexdigest() != reference["sha256"]
+                    or proof.get("schema_version") != "recovered-development-backend-1"
+                    or proof.get("development_session") != self.binding
+                    or proof.get("session_id") != state["session_id"]
+                    or proof.get("previous_config_sha256") != digest
+                    or proof.get("backend_sha256") != next_digest or next_digest in allowed
+                    or not snapshot.resolve().is_relative_to(path.parent)
+                    or hashlib.sha256(prior_raw).hexdigest() != proof["previous_session_sha256"]
+                    or prior.get("binding") != self.binding or prior.get("session_id") != state["session_id"]
+                    or prior.get("config_sha256") != digest or prior.get("active_job") is not None
+                    or prior.get("calls") != state["calls"][:boundary]
+                    or prior.get("backend_revisions", []) != revisions[:len(allowed)-1]):
+                raise ValidationError("development backend revision lost its exact settled lineage")
+            allowed[next_digest] = boundary
+            digest = next_digest
+        if digest != state["config_sha256"]:
+            raise ValidationError("development backend revision differs from current configuration")
+        return allowed
 
     @property
     def read_roots(self):

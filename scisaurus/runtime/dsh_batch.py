@@ -166,7 +166,7 @@ class DshBatchRunner:
     """One fresh session per work order, with controller-owned receipts."""
 
     def __init__(self, config, *, root, runtime_read_roots=(), laboratory=None,
-                 development_session=None, isolated_from=(), required_startup_marker=None):
+                 development_session=None, isolated_from=(), required_startup_marker=None, forbid_reasoning=False):
         self.config = validate_batch_config(config)
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
@@ -175,6 +175,7 @@ class DshBatchRunner:
         if required_startup_marker is not None and (not isinstance(required_startup_marker, str) or not required_startup_marker):
             raise ValidationError("DSH startup marker must be a nonempty string")
         self.required_startup_marker = required_startup_marker
+        self.forbid_reasoning = forbid_reasoning
         self.laboratory = laboratory
         from scisaurus.runtime.development_session import DevelopmentSession
         self.development_session = (DevelopmentSession(development_session)
@@ -364,8 +365,12 @@ class DshBatchRunner:
             event = params.get("event", {})
             data = event.get("data", {})
             identity = (params.get("sessionId"), data.get("turn"), data.get("step"))
-            if identity[1] in completed_turns:
+            if resume_pending or identity[1] in completed_turns:
                 return
+            chunk = data.get("chunk", {})
+            if (self.forbid_reasoning and event.get("type") == "assistant/chunk"
+                    and chunk.get("type") == "reasoning-delta" and chunk.get("text")):
+                raise RuntimeError("provider violated explicit reasoning-off request; no redispatch permitted")
             if event.get("type") == "step/start":
                 if identity not in calls_seen:
                     calls_seen.add(identity)
@@ -775,7 +780,7 @@ class DshStructuredProducerClient:
 
     deliverable_label = "structured producer"
 
-    def __init__(self, config, *, root, runtime_python, development_session=None, isolated_from=(), required_startup_marker=None):
+    def __init__(self, config, *, root, runtime_python, development_session=None, isolated_from=(), required_startup_marker=None, forbid_reasoning=False):
         self.config = validate_batch_config(config)
         self.model = config["model"]
         self.timeout_seconds = config["timeout_seconds"]
@@ -784,7 +789,7 @@ class DshStructuredProducerClient:
         self.runner = DshBatchRunner(config, root=root,
             runtime_read_roots=[str(Path(runtime_python).absolute().parent.parent)],
             development_session=development_session, isolated_from=isolated_from,
-            required_startup_marker=required_startup_marker)
+            required_startup_marker=required_startup_marker, forbid_reasoning=forbid_reasoning)
 
     def task(self, assignment):
         task = (
