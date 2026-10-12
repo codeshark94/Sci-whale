@@ -187,7 +187,8 @@ def completed_step(root, *, receipt_sha256, attempt_path):
         sealed = project / 'intake-controller' / (sha(marker_raw) + '.json')
         if (sealed.read_bytes()!=marker_raw or record.get('schema_version')!='fresh-intake-attempt-1'
                 or record.get('status') not in {'stopped_with_unreviewed_proposal','stopped_after_observation',
-                                              'stopped_with_unreviewed_invention','stopped_on_error'}):
+                                              'stopped_with_unreviewed_invention','stopped_on_error',
+                                              'stopped_with_unadmitted_self_review','stopped_with_unreviewed_concepts'}):
             raise StateError('completed step requires its exact stopped marker')
         binding_path = Path(record['backend_binding']).resolve()
         if not binding_path.is_relative_to(project / 'intake-controller'):
@@ -296,3 +297,10 @@ def prepare_invention_review(root, *, receipt_sha256, attempt_path):
     from scisaurus.runtime.invention_review import review_request
     with completed_step(root, receipt_sha256=receipt_sha256, attempt_path=attempt_path) as context:
         return seal_completed_step(context, review_request(context))
+
+
+def prepare_concept_step(root, *, receipt_sha256, attempt_path):
+    """Seal one capability-led concept design from the current stopped primary frontier."""
+    from scisaurus.runtime.concept_invention import concept_request
+    with completed_step(root, receipt_sha256=receipt_sha256, attempt_path=attempt_path) as context:
+        return seal_completed_step(context, concept_request(context))

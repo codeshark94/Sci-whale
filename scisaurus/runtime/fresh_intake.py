@@ -22,6 +22,11 @@ FAILURE_POLICY_READY = "SCISAURUS_TOOL_FAILURE_POLICY_READY:cancel-owning-agent-
 
 class IntakePrimaryClient(DshStructuredProducerClient):
     def input_files(self, assignment, system):
+        if assignment.get('concept_invention'):
+            from scisaurus.runtime.concept_invention import concept_files, delivered_request
+            request=assignment['concept_invention']
+            value=deepcopy(assignment);value['concept_invention']=delivered_request(request)
+            return {**super().input_files(value,system),**concept_files(request)}
         if assignment.get('invention_review'):
             from scisaurus.runtime.invention_review import review_files, delivered_request
             request=assignment['invention_review']
@@ -30,6 +35,25 @@ class IntakePrimaryClient(DshStructuredProducerClient):
         return super().input_files(assignment,system)
 
     def task(self, assignment):
+        if assignment.get('concept_invention'):
+            return (
+                "Continue the same primary session and preserve its history. Read every line of "
+                "assignment.json, system-contract.txt and held-candidates.json from the current input "
+                "directory. Concatenate each literal_chunks object without changing characters; "
+                "continue from the exact next unread line after truncation. Follow concept_invention.rules "
+                "in order: boldly imagine unfamiliar useful capabilities first, then develop your own "
+                "physical mechanism and concrete structural design, then check physical limits and plan "
+                "a small future possibility test. Installed solvers and known topic templates do not rank "
+                "the initial imagination. The held catalog is negative context; no prior design is "
+                "selected for development. Give an intelligible prospect with components, arrangement, "
+                "interfaces, state transitions and a text schematic. Unknown novelty may remain "
+                "unverified in this concept-only deliverable. Do not demand an experimental final result "
+                "before the design exists or invent successful results. Write response.json directly in "
+                "the declared writable workspace with the sole key concept_design, following "
+                "output_contract.concept_design. Supply your own ideas; the template only defines fields. "
+                "Do not retrieve sources, run a solver, install tools, delegate authorship, retry a failed "
+                "tool or request repair. The controller checks custody, input delivery and schema, "
+                "then stops without scientific admission or automatic redispatch.")
         if assignment.get('invention_review'):
             return (
                 "Continue the same primary session. Your FIRST tool operation must read unread-input.txt "
@@ -186,6 +210,14 @@ def preflight(root, runtime_python, *, continuation=None):
                                 attempt_path=current_control['attempt']) as context:
                 if request!=review_request(context):
                     raise StateError('self-review differs from its exact predecessor inputs and hypotheses')
+        elif kind=='concept_invention':
+            from scisaurus.runtime.intake_recovery import completed_step
+            from scisaurus.runtime.concept_invention import concept_request
+            current_control=read_control(project/'output')
+            with completed_step(root, receipt_sha256=ticket['receipt_sha256'],
+                                attempt_path=current_control['attempt']) as context:
+                if request!=concept_request(context):
+                    raise StateError('concept imagination changed its held history or process contract')
         else:raise StateError("unsupported explicit research step")
     if not Path(runtime_python).is_file():
         raise StateError("intake requires an installed Python runtime")
@@ -307,6 +339,8 @@ def run_once(root, runtime_python, *, recovery=None, continuation=None):
     literature=step_request if step_request and step_request["kind"]=="literature_acquisition" else None
     invention=step_request if step_request and step_request["kind"]=="invention" else None
     review=step_request if step_request and step_request['kind']=='invention_review' else None
+    concept=step_request if step_request and step_request['kind']=='concept_invention' else None
+    authored_step=invention or review or concept
     if literature:
         from scisaurus.runtime.literature_collection import literature_contract
         assignment["literature_acquisition"] = literature
@@ -331,6 +365,14 @@ def run_once(root, runtime_python, *, recovery=None, continuation=None):
             'One self-review response only. No controller tools, retrieval or scientific execution.']}
         actions={}
         assignment['execution_step']={'mode':'one_self_review_then_stop','rules':review['rules']}
+    if concept:
+        assignment['phase']='concept_invention'
+        assignment['concept_invention']=concept
+        assignment['output_contract']=concept['output_contract']
+        assignment['scientific_software_tools']={'actions':{},'response':{},'rules':[
+            'One concept-design response only. No controller tools, retrieval or scientific execution.']}
+        actions={}
+        assignment['execution_step']={'mode':'one_concept_design_then_stop','rules':concept['rules']}
     project = root / "composer"
     output = project / "output"
     directory = project / "intake-controller"
@@ -349,13 +391,13 @@ def run_once(root, runtime_python, *, recovery=None, continuation=None):
             "session_id": checkpoint["session_id"], "preparation_sha256": sha(canonical_bytes(checkpoint)),
             "recovery": recovery, "status": "started", "scientific_admission": "not_assessed",
             "receipt": None, "usage": None,
-            **({"held_candidate_statuses":{identity:"held" for identity in (invention or review)["held_candidate_ids"]}}
-               if invention or review else {})}
+            **({"held_candidate_statuses":{identity:"held" for identity in authored_step["held_candidate_ids"]}}
+               if authored_step else {})}
         attempt.write_bytes(canonical_bytes(record))
         save_control(output, {**control, "generation": generation, "stop_requested": False,
                               "controller": "fresh-intake-once", "attempt": str(attempt),
             **({"candidate_statuses":record["held_candidate_statuses"],"invention_policy_ref":str(continuation)}
-               if invention or review else {})})
+               if authored_step else {})})
     names = ("SCISAURUS_RUN_CONTROL", "SCISAURUS_RUN_GENERATION")
     previous = {key: os.environ.get(key) for key in names}
     os.environ.update(dict(zip(names, (str(output / "run-control.json"), generation))))
@@ -383,11 +425,27 @@ def run_once(root, runtime_python, *, recovery=None, continuation=None):
             system+='invention_review.rules and output_contract.invention_review; read the previously '
             system+='undisplayed input first. Topic selection and invention generation are not active. '
             system+='No mechanism verdict, design, parameter or positive outcome is supplied by the controller.'
+        if concept:
+            system+='\nActive phase: concept_invention. concept_invention.rules and '
+            system+='output_contract.concept_design govern this response. Imagine capabilities before '
+            system+='mechanisms and structures, then check limits and define a future possibility test. '
+            system+='An unverified concept-only proposal is permitted without prior full-text novelty '
+            system+='certification or executed results. The retained candidates are held negative '
+            system+='constraints. No specific concept, scientific design, coefficient or positive '
+            system+='outcome is supplied by the controller.'
         result = client.complete(system=system,prompt=json.dumps(assignment))
         record.update(receipt=result.response_metadata["receipt"], usage=result.usage)
         response = result.json_object()
         record["response"] = response
-        if review:
+        if concept:
+            from scisaurus.runtime.concept_invention import validate_concepts
+            from scisaurus.runtime.input_delivery import verify_full_input_reads
+            if set(response)!={'concept_design'}:
+                raise ValidationError('concept imagination accepts one concept_design response only')
+            validate_concepts(response['concept_design'],concept,assignment['excluded_topics'])
+            record['input_read_coverage']=verify_full_input_reads(record['receipt'])
+            record['status']='stopped_with_unreviewed_concepts'
+        elif review:
             from scisaurus.runtime.invention_review import validate_review
             from scisaurus.runtime.input_delivery import verify_full_input_reads
             if set(response)!={'invention_review'}:
