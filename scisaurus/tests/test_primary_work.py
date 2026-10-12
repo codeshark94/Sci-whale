@@ -79,6 +79,19 @@ class PrimaryWorkTests(unittest.TestCase):
                 'state':{'session_id':'same-primary','calls':[]}}
             request=work_request(context)
             self.assertEqual(request['checkpoint']['observations'],[prior])
+            archive=job/'old-job';(archive/'native-tool-results').mkdir(parents=True)
+            result=json.dumps({'observation':prior}).encode();(archive/'native-tool-results/call.json').write_bytes(result)
+            old_receipt={'session_id':'same-primary','native_tool_calls':[{'status':'responded','response_file':'call.json','response_sha256':sha(result)}]}
+            old_path=archive/'receipt.json';old_path.write_bytes(canonical_bytes(old_receipt))
+            context['state']['calls']=[{'receipt':str(old_path),'sha256':sha(old_path.read_bytes())}]
+            (job/'input/assignment.json').write_text('{}')
+            self.assertEqual(work_request(context)['checkpoint']['observations'],[prior])
+            error=json.dumps({'channel':'owned','sessionId':'same-primary','callId':'bad-call','error':'invalid argument'}).encode()
+            (archive/'native-tool-results/error.json').write_bytes(error)
+            old_receipt['native_tool_calls'].append({'status':'responded','response_file':'error.json','response_sha256':sha(error)})
+            old_path.write_bytes(canonical_bytes(old_receipt));context['state']['calls'][0]['sha256']=sha(old_path.read_bytes())
+            self.assertEqual(work_request(context)['checkpoint']['observations'],[prior])
+            self.assertEqual((archive/'native-tool-results/error.json').read_bytes(),error)
 
     def mocked_note(self,ticket,delivery=True,notes=None,workspace_notes=None):
         args=self.preflight(ticket);root,cp,backend,assignment,protected=args;t=json.loads(ticket.read_bytes())

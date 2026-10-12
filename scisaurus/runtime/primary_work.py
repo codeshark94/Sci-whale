@@ -40,6 +40,22 @@ def work_request(context, feedback=None):
     inherited=delivered.get('research_work',{}).get('checkpoint',{})
     observations=[*inherited.get('observations',[]),context['record'].get('observation') or {},
                   *context['record'].get('observations',[])]
+    for call in context['state']['calls']:
+        path=Path(call['receipt']);raw=path.read_bytes()
+        if sha(raw)!=call['sha256']:
+            raise StateError('recorded primary receipt changed')
+        receipt=json.loads(raw)
+        if receipt['session_id']!=context['state']['session_id']:
+            raise StateError('recorded tool evidence belongs to another primary')
+        for native in receipt.get('native_tool_calls',[]):
+            if native.get('status')!='responded':continue
+            result_path=path.parent/'native-tool-results'/native['response_file'];body=result_path.read_bytes()
+            if sha(body)!=native['response_sha256']:
+                raise StateError('recorded native observation changed')
+            reply=json.loads(body)
+            if 'observation' in reply:
+                observations.append(reply['observation'])
+    observations=list({x.get('receipt_ref') or (index,):x for index,x in enumerate(observations) if x}.values())
     if (any(x.get('outcome')=='result_unknown' for x in observations)
             or any(x.get('status')=='requested' for x in context['receipt'].get('native_tool_calls',[]))):
         raise StateError('unknown tool execution requires reconciliation before further work')
