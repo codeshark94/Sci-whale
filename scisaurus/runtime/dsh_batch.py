@@ -25,6 +25,12 @@ from scisaurus.runtime.run_control import ensure_run_allowed, start_process
 from scisaurus.runtime.run_control import RunPausedError
 
 
+def task_json_bytes(value):
+    """Render semantic JSON as readable task text; receipts seal its actual bytes."""
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2,
+                      allow_nan=False, default=str).encode("utf-8")
+
+
 class DshBatchError(ModelWorkBlocked):
     """A batch outcome is retained without starting another authoring loop."""
 
@@ -682,7 +688,7 @@ class DshAuthorClient:
         base.pop("author_backend", None)
         base.pop("response_contract", None)
         base["runtime_python"] = self.runtime_python
-        inputs = {"assignment.json": canonical_bytes(projected),
+        inputs = {"assignment.json": task_json_bytes(projected),
                   "execution-contract.json": canonical_bytes(base)}
         if self.laboratory is not None:
             inputs["laboratory.json"] = canonical_bytes(
@@ -810,7 +816,7 @@ class DshStructuredProducerClient:
         return None
 
     def input_files(self, assignment, system):
-        return {"assignment.json": canonical_bytes(assignment),
+        return {"assignment.json": task_json_bytes(assignment),
                 "system-contract.txt": (system or "").encode("utf-8")}
 
     def complete(self, *, system, prompt):
@@ -969,7 +975,7 @@ class DshValidatorClient:
                 "Do not search for the producer implementation or fabricate observations. Do not change "
                 "scientific inputs, estimands, tolerances or gates to force agreement. Preserve local commands "
                 "and check outputs in the workspace. The exported file, rather than final chat text, is the deliverable.")
-        inputs = {"assignment.json": canonical_bytes(assignment)}
+        inputs = {"assignment.json": task_json_bytes(assignment)}
         if self.laboratory is not None:
             inputs["laboratory.json"] = canonical_bytes(self.laboratory.authoring_context(self.runner.root))
             task += " Read laboratory.json for the shared attested runtime invocation interface and host limits. It contains no producer source or computed results."

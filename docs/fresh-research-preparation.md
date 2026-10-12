@@ -76,3 +76,9 @@ The attempt marker blocks redispatch even after an error. Any interruption or pa
 unknown remains a recovery obligation, not permission to repeat the step. Final
 cleanup restores the durable stop and revokes launch permission. No actual intake
 step or recovery evidence is supplied by preparation or preflight.
+
+Structured producer task files use indented JSON so filesystem readers do not
+truncate the entire assignment as one long line. The semantic JSON value stays
+unchanged; receipt hashes bind the actual serialized bytes. Historical frozen task
+files and receipts are never reformatted. A formatting repair cannot release an
+owned paid-unknown attempt or authorize a new dispatch.
