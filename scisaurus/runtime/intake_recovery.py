@@ -180,12 +180,14 @@ def completed_step(root, *, receipt_sha256, attempt_path):
         marker = Path(attempt_path).resolve()
         if not marker.is_relative_to(project / 'intake-controller'):
             raise StateError('completed predecessor has a foreign owner')
+        if Path(json.loads(control_raw).get('attempt', '')).resolve() != marker:
+            raise StateError('completed predecessor is not the current stopped frontier')
         marker_raw = marker.read_bytes()
         record = json.loads(marker_raw)
         sealed = project / 'intake-controller' / (sha(marker_raw) + '.json')
         if (sealed.read_bytes()!=marker_raw or record.get('schema_version')!='fresh-intake-attempt-1'
                 or record.get('status') not in {'stopped_with_unreviewed_proposal','stopped_after_observation',
-                                              'stopped_with_unreviewed_invention'}):
+                                              'stopped_with_unreviewed_invention','stopped_on_error'}):
             raise StateError('completed step requires its exact stopped marker')
         binding_path = Path(record['backend_binding']).resolve()
         if not binding_path.is_relative_to(project / 'intake-controller'):
@@ -287,3 +289,10 @@ def prepare_invention_step(root, *, receipt_sha256, attempt_path):
             'observation_path':observation['receipt'],'observation_sha256':observation['receipt_sha256'],
             'retained_source_metadata':sources,'output_contract':invention_contract(),'rules':INVENTION_RULES}
         return seal_completed_step(c,request)
+
+
+def prepare_invention_review(root, *, receipt_sha256, attempt_path):
+    """Seal one explicitly authorized review without changing the completed predecessor."""
+    from scisaurus.runtime.invention_review import review_request
+    with completed_step(root, receipt_sha256=receipt_sha256, attempt_path=attempt_path) as context:
+        return seal_completed_step(context, review_request(context))

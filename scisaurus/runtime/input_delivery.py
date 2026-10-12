@@ -17,7 +17,7 @@ def missing_ranges(numbers):
     return ranges
 
 
-def input_read_coverage(receipt_path):
+def input_read_coverage(receipt_path, *, first_input=None):
     """Count matching displayed lines from owned read calls in the current turn only."""
     receipt_path = Path(receipt_path).resolve()
     raw = receipt_path.read_bytes()
@@ -35,6 +35,10 @@ def input_read_coverage(receipt_path):
         inputs[str(path)] = {'name': name, 'lines': path.read_text().splitlines(), 'covered': set()}
     if not inputs:
         raise StateError('input delivery has no owned input files')
+    first = str((receipt_path.parent / 'input' / first_input).resolve()) if first_input else None
+    if first is not None and first not in inputs:
+        raise StateError('first input is not owned by this receipt')
+    ordered = True
     events_raw = (receipt_path.parent / 'events.jsonl').read_bytes()
     calls = {}
     for line in events_raw.decode().splitlines():
@@ -44,6 +48,12 @@ def input_read_coverage(receipt_path):
         data = event.get('data', {})
         if params.get('sessionId') != receipt['session_id'] or data.get('turn') not in turns:
             continue
+        if event.get('type') == 'tool/call' and first is not None:
+            complete_first = len(inputs[first]['covered']) == len(inputs[first]['lines'])
+            arguments = json.loads(data['arguments'])
+            target = str(Path(arguments.get('file_path', '')).resolve())
+            if not complete_first and (data.get('name') != 'read' or target != first):
+                ordered = False
         if event.get('type') == 'tool/call' and data.get('name') == 'read':
             arguments = json.loads(data['arguments'])
             path = str(Path(arguments['file_path']).resolve())
@@ -69,15 +79,16 @@ def input_read_coverage(receipt_path):
         files[value['name']] = {'total_lines': len(value['lines']),
             'displayed_lines': len(value['covered']), 'missing_ranges': missing_ranges(missing)}
     return {'receipt_sha256': sha(raw), 'events_sha256': sha(events_raw),
-        'complete': all(not x['missing_ranges'] for x in files.values()), 'files': files}
+        'complete': ordered and all(not x['missing_ranges'] for x in files.values()), 'files': files,
+        **({'delivery_order': {'first_input': first_input, 'satisfied': ordered}} if first_input else {})}
 
 
-def verify_full_input_reads(receipt_path):
-    coverage = input_read_coverage(receipt_path)
+def verify_full_input_reads(receipt_path, *, first_input=None):
+    coverage = input_read_coverage(receipt_path, first_input=first_input)
     if not coverage['complete']:
         missing = {name: value['missing_ranges'] for name, value in coverage['files'].items()
                    if value['missing_ranges']}
-        error = StateError('primary input delivery is incomplete: ' + json.dumps(missing))
+        error = StateError('primary input delivery is incomplete or out of order: ' + json.dumps(missing))
         error.input_read_coverage = coverage
         raise error
     return coverage

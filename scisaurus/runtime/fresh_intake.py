@@ -21,7 +21,30 @@ FAILURE_POLICY_READY = "SCISAURUS_TOOL_FAILURE_POLICY_READY:cancel-owning-agent-
 
 
 class IntakePrimaryClient(DshStructuredProducerClient):
+    def input_files(self, assignment, system):
+        if assignment.get('invention_review'):
+            from scisaurus.runtime.invention_review import review_files, delivered_request
+            request=assignment['invention_review']
+            value=deepcopy(assignment);value['invention_review']=delivered_request(request)
+            return {**super().input_files(value,system),**review_files(request)}
+        return super().input_files(assignment,system)
+
     def task(self, assignment):
+        if assignment.get('invention_review'):
+            return (
+                "Continue the same primary session. Your FIRST tool operation must read unread-input.txt "
+                "from the current job input directory. Finish all of that file before any other input or "
+                "operation; if truncated, continue from its exact next unread line. It contains the exact "
+                "missing lines of the prior assignment, not a new scientific instruction. Then read every "
+                "line of assignment.json, system-contract.txt and hypotheses.json. In hypotheses.json, "
+                "concatenate each literal_chunks object without added characters. Review only its retained "
+                "hypothesis identities under invention_review.rules. Reassess the mechanism, scaling, "
+                "matched controls, strongest conventional explanation and novelty evidence; do not redesign "
+                "or create a new topic. Write response.json directly in the declared writable workspace "
+                "with the sole key invention_review following output_contract.invention_review. "
+                "No controller tool request, network retrieval, solver, other author, tool retry or repair "
+                "is authorized. This is self-review, not independent scientific validation or admission. "
+                "The controller rejects incomplete or out-of-order input delivery without another call.")
         if assignment.get("invention_process"):
             return (
                 "Read the complete immutable assignment.json and system-contract.txt. Continue the same "
@@ -155,6 +178,14 @@ def preflight(root, runtime_python, *, continuation=None):
                     or predecessor.get("response")!={"tool_action":observation["action"]}
                     or source_metadata(observation)!=request["retained_source_metadata"]):
                 raise StateError("invention source context differs from its actual observation")
+        elif kind=="invention_review":
+            from scisaurus.runtime.intake_recovery import completed_step
+            from scisaurus.runtime.invention_review import review_request
+            current_control=read_control(project/'output')
+            with completed_step(root, receipt_sha256=ticket['receipt_sha256'],
+                                attempt_path=current_control['attempt']) as context:
+                if request!=review_request(context):
+                    raise StateError('self-review differs from its exact predecessor inputs and hypotheses')
         else:raise StateError("unsupported explicit research step")
     if not Path(runtime_python).is_file():
         raise StateError("intake requires an installed Python runtime")
@@ -275,6 +306,7 @@ def run_once(root, runtime_python, *, recovery=None, continuation=None):
     step_request=ticket.get("step_request") if continuation else None
     literature=step_request if step_request and step_request["kind"]=="literature_acquisition" else None
     invention=step_request if step_request and step_request["kind"]=="invention" else None
+    review=step_request if step_request and step_request['kind']=='invention_review' else None
     if literature:
         from scisaurus.runtime.literature_collection import literature_contract
         assignment["literature_acquisition"] = literature
@@ -291,6 +323,14 @@ def run_once(root, runtime_python, *, recovery=None, continuation=None):
             "This is one invention response only. No controller tools, literature retrieval or scientific execution."]}
         actions={}
         assignment["execution_step"]={"mode":"one_invention_response_then_stop","rules":invention["rules"]}
+    if review:
+        assignment['phase']='invention_review'
+        assignment['invention_review']=review
+        assignment['output_contract']=review['output_contract']
+        assignment['scientific_software_tools']={'actions':{},'response':{},'rules':[
+            'One self-review response only. No controller tools, retrieval or scientific execution.']}
+        actions={}
+        assignment['execution_step']={'mode':'one_self_review_then_stop','rules':review['rules']}
     project = root / "composer"
     output = project / "output"
     directory = project / "intake-controller"
@@ -309,11 +349,13 @@ def run_once(root, runtime_python, *, recovery=None, continuation=None):
             "session_id": checkpoint["session_id"], "preparation_sha256": sha(canonical_bytes(checkpoint)),
             "recovery": recovery, "status": "started", "scientific_admission": "not_assessed",
             "receipt": None, "usage": None,
-            **({"held_candidate_statuses":{identity:"held" for identity in invention["held_candidate_ids"]}} if invention else {})}
+            **({"held_candidate_statuses":{identity:"held" for identity in (invention or review)["held_candidate_ids"]}}
+               if invention or review else {})}
         attempt.write_bytes(canonical_bytes(record))
         save_control(output, {**control, "generation": generation, "stop_requested": False,
                               "controller": "fresh-intake-once", "attempt": str(attempt),
-            **({"candidate_statuses":record["held_candidate_statuses"],"invention_policy_ref":str(continuation)} if invention else {})})
+            **({"candidate_statuses":record["held_candidate_statuses"],"invention_policy_ref":str(continuation)}
+               if invention or review else {})})
     names = ("SCISAURUS_RUN_CONTROL", "SCISAURUS_RUN_GENERATION")
     previous = {key: os.environ.get(key) for key in names}
     os.environ.update(dict(zip(names, (str(output / "run-control.json"), generation))))
@@ -336,11 +378,24 @@ def run_once(root, runtime_python, *, recovery=None, continuation=None):
                     "govern this response. The retained topic-selection phase and runtime-first planning " \
                     "are not the active task. No scientific design, parameter, verdict or positive outcome " \
                     "is supplied by the controller."
+        if review:
+            system+='\nActive phase: invention_review. Review only the preserved hypotheses under '
+            system+='invention_review.rules and output_contract.invention_review; read the previously '
+            system+='undisplayed input first. Topic selection and invention generation are not active. '
+            system+='No mechanism verdict, design, parameter or positive outcome is supplied by the controller.'
         result = client.complete(system=system,prompt=json.dumps(assignment))
         record.update(receipt=result.response_metadata["receipt"], usage=result.usage)
         response = result.json_object()
         record["response"] = response
-        if invention:
+        if review:
+            from scisaurus.runtime.invention_review import validate_review
+            from scisaurus.runtime.input_delivery import verify_full_input_reads
+            if set(response)!={'invention_review'}:
+                raise ValidationError('self-review accepts one review response only')
+            validate_review(response['invention_review'],review)
+            record['input_read_coverage']=verify_full_input_reads(record['receipt'],first_input='unread-input.txt')
+            record['status']='stopped_with_unadmitted_self_review'
+        elif invention:
             from scisaurus.runtime.invention import validate_invention
             from scisaurus.runtime.input_delivery import verify_full_input_reads
             if set(response)!={"invention"}:raise ValidationError("invention step accepts one invention response only")

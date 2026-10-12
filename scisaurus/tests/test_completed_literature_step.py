@@ -42,6 +42,8 @@ class CompletedLiteratureStepTests(unittest.TestCase):
         backend_path=Path(f.attempt_body['backend_binding']);backend_path.write_bytes(canonical_bytes({'backend':f.config}))
         f.attempt_body.update(status='stopped_with_unreviewed_proposal',response=self.proposal,preparation_sha256=sha(raw))
         f.seal_attempt()
+        control=f.project/'output/run-control.json';value=json.loads(control.read_bytes())
+        value['attempt']=str(f.attempt);control.write_bytes(canonical_bytes(value))
 
     def tearDown(self):self.f.tearDown()
     def prepare(self):return prepare_literature_step(self.f.root,receipt_sha256=self.f.sha,attempt_path=self.f.attempt)
