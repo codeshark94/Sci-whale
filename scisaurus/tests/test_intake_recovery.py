@@ -82,6 +82,14 @@ class IntakeAccountingTests(unittest.TestCase):
         with self.session.lease(self.config, time.monotonic()+1):
             self.assertEqual(self.session.state['session_id'], 'original')
 
+    def test_nested_attempt_uses_the_project_content_addressed_record(self):
+        directory=self.project/'intake-controller/recoveries/exact'
+        directory.mkdir(parents=True)
+        nested=directory/'next.attempt.json'
+        nested.write_bytes(self.attempt.read_bytes())
+        self.attempt=nested
+        self.assertIsNotNone(self.settle()['artifact_ref'])
+
     def test_foreign_hash_and_usage_are_rejected_without_releasing_owner(self):
         self.attempt_body['usage'] = dict(self.usage, output_tokens=0)
         self.seal_attempt()
@@ -216,3 +224,14 @@ class ExplicitPreparationTests(IntakeAccountingTests):
         proof.chmod(0o644);proof.write_bytes(canonical_bytes(value))
         with self.assertRaisesRegex(StateError,'proof changed'):self.prepare()
         self.assertEqual(self.session.path.read_bytes(),state)
+
+
+class IntakeResponseDeliveryTests(unittest.TestCase):
+    def test_task_names_current_input_schema_and_writable_response_without_controller_search(self):
+        from scisaurus.runtime.fresh_intake import IntakePrimaryClient
+        task = IntakePrimaryClient.task(None, {})
+        self.assertIn('scientific_software_tools.response',task)
+        self.assertIn('output_contract.topic_selection',task)
+        self.assertIn('response.json directly in the declared writable workspace',task)
+        self.assertIn('already formatted',task)
+        self.assertIn('outside the read grants',task)

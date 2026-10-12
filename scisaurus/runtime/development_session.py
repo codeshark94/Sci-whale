@@ -421,7 +421,7 @@ class DevelopmentSession:
             attempt_path = Path(attempt_path).resolve()
             attempt_raw = attempt_path.read_bytes()
             attempt = json.loads(attempt_raw)
-            sealed = attempt_path.parent / (hashlib.sha256(attempt_raw).hexdigest() + ".json")
+            sealed = project / "intake-controller" / (hashlib.sha256(attempt_raw).hexdigest() + ".json")
             path = Path(attempt.get("receipt", "")).resolve()
             raw = path.read_bytes()
             receipt = json.loads(raw)

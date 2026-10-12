@@ -23,8 +23,12 @@ FAILURE_POLICY_READY = "SCISAURUS_TOOL_FAILURE_POLICY_READY:cancel-owning-agent-
 class IntakePrimaryClient(DshStructuredProducerClient):
     def task(self, assignment):
         return ("Read assignment.json and system-contract.txt. Follow the active single-step intake "
-                "contract. Write response.json as one declared tool_action or the complete "
-                "topic_selection proposal. Do not run local scientific substitutes or repair loops. "
+                "contract. The response schemas are in assignment.json: scientific_software_tools.response "
+                "and output_contract.topic_selection. Write response.json directly in the declared writable "
+                "workspace as one tool_action or the complete topic_selection proposal. Read the current "
+                "immutable assignment completely; it is already formatted for the read tool. Job and "
+                "controller directories are outside the read grants and contain no additional response schema. "
+                "Do not run local scientific substitutes or repair loops. "
                 "A failed local tool aborts this attempt; do not retry it or request another model step.")
 
 
