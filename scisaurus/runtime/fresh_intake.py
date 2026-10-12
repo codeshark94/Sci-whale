@@ -22,6 +22,20 @@ FAILURE_POLICY_READY = "SCISAURUS_TOOL_FAILURE_POLICY_READY:cancel-owning-agent-
 
 class IntakePrimaryClient(DshStructuredProducerClient):
     def task(self, assignment):
+        if assignment.get("invention_process"):
+            return (
+                "Read the complete immutable assignment.json and system-contract.txt. Continue the same "
+                "primary session and retained history. Follow invention_process.rules in their stated order: "
+                "unmet function, distinct physical mechanisms, falsifiable predictions, counterexamples, "
+                "then later feasibility. The existing candidates are held, not development targets. "
+                "Novelty is unverified. Concatenate literal chunk arrays without changing characters. "
+                "Write response.json directly in the declared writable workspace as an object with "
+                "the sole key invention, whose value follows output_contract.invention. "
+                "Its field examples describe required meanings; "
+                "supply your own scientific hypotheses. Do not submit topic_selection or tool_action, "
+                "retrieve more literature, run a solver, delegate authorship, or repair a failed tool. "
+                "The controller checks the schema and stops; it does not certify creativity or science. "
+                "A failed local tool aborts this attempt before another model step.")
         return ("Read assignment.json and system-contract.txt. Follow the active single-step intake "
                 "contract. The response schemas are in assignment.json: scientific_software_tools.response "
                 "and output_contract.topic_selection. Write response.json directly in the declared writable "
@@ -98,20 +112,48 @@ def preflight(root, runtime_python, *, continuation=None):
         if previous_receipt.get("status") != ticket.get("prior_receipt_status", "result_unknown"):
             raise StateError("intake continuation changed its predecessor terminal status")
     if ticket and ticket.get("step_request"):
-        request = ticket["step_request"]
-        path = Path(request["proposal_path"]).resolve()
-        receipt_path = Path(state["calls"][-1]["receipt"]).resolve()
-        receipt = json.loads(receipt_path.read_bytes())
-        if (ticket.get("prior_receipt_status") != "completed" or receipt.get("status") != "completed"
-                or request.get("kind") != "literature_acquisition"
-                or path != receipt_path.parent / "outputs/response.json"
-                or sha(path.read_bytes()) != request["proposal_sha256"]):
-            raise StateError("literature step lost its exact completed proposal")
-        proposal = json.loads(path.read_bytes())["topic_selection"]
-        reconstructed = [{key: "".join(parts) for key,parts in row.items()}
-                         for row in request["candidate_literal_chunks"]]
-        if reconstructed != proposal["candidates"] or request["candidate_ids"] != [c["id"] for c in reconstructed]:
-            raise StateError("literature step changed its current candidates")
+        request=ticket["step_request"]; kind=request.get("kind")
+        if ticket.get("prior_receipt_status")!="completed":
+            raise StateError("research step requires a completed predecessor")
+        if kind=="literature_acquisition":
+            path=Path(request["proposal_path"]).resolve()
+            receipt_path=Path(state["calls"][-1]["receipt"]).resolve()
+            if path!=receipt_path.parent/"outputs/response.json" or sha(path.read_bytes())!=request["proposal_sha256"]:
+                raise StateError("literature step lost its exact completed proposal")
+            proposal=json.loads(path.read_bytes())["topic_selection"]
+            reconstructed=[{key:"".join(parts) for key,parts in row.items()} for row in request["candidate_literal_chunks"]]
+            if reconstructed!=proposal["candidates"] or request["candidate_ids"]!=[c["id"] for c in reconstructed]:
+                raise StateError("literature step changed its current candidates")
+        elif kind=="invention":
+            from scisaurus.runtime.invention import invention_contract, INVENTION_RULES, verify_observation, source_metadata
+            path=Path(request["held_proposal_path"]).resolve()
+            owned={Path(call["receipt"]).resolve().parent/"outputs/response.json" for call in state["calls"]}
+            if path not in owned or sha(path.read_bytes())!=request["held_proposal_sha256"]:
+                raise StateError("invention lost its owned held proposal")
+            candidates=json.loads(path.read_bytes())["topic_selection"]["candidates"]
+            reconstructed=[{k:"".join(v) for k,v in row.items()} for row in request["held_candidate_literal_chunks"]]
+            if (reconstructed!=candidates or request["held_candidate_ids"]!=[c["id"] for c in candidates]
+                    or request["output_contract"]!=invention_contract() or request["rules"]!=INVENTION_RULES):
+                raise StateError("invention changed its held candidates or process")
+            observation_path=Path(request["observation_path"]).resolve()
+            observation=json.loads(observation_path.read_bytes())
+            observation.update(receipt=str(observation_path),receipt_sha256=request["observation_sha256"])
+            verify_observation(observation,project,candidate_ids=request['held_candidate_ids'])
+            previous_control=json.loads((project/"output/run-control.json").read_bytes())
+            previous_marker=Path(previous_control["attempt"]).resolve()
+            if not previous_marker.is_relative_to(project/"intake-controller"):
+                raise StateError("invention predecessor marker belongs to another project")
+            previous_raw=previous_marker.read_bytes()
+            previous_sealed=project/"intake-controller"/(sha(previous_raw)+".json")
+            if previous_sealed.read_bytes()!=previous_raw:
+                raise StateError("invention predecessor marker differs from its immutable record")
+            predecessor=json.loads(previous_raw)
+            if (predecessor.get("receipt")!=state["calls"][-1]["receipt"]
+                    or predecessor.get("observation")!=observation
+                    or predecessor.get("response")!={"tool_action":observation["action"]}
+                    or source_metadata(observation)!=request["retained_source_metadata"]):
+                raise StateError("invention source context differs from its actual observation")
+        else:raise StateError("unsupported explicit research step")
     if not Path(runtime_python).is_file():
         raise StateError("intake requires an installed Python runtime")
     assignment = json.loads((root / "inputs/assignment.json").read_bytes())
@@ -228,7 +270,9 @@ def run_once(root, runtime_python, *, recovery=None, continuation=None):
         "rule": "Request one declared source/runtime assessment tool, or submit a proposal/abstention. "
                 "The controller records one response and at most one tool observation, then stops. "
                 "Installation and scientific computation require a later frozen pilot; no repair model is called."}
-    literature = ticket.get("step_request") if continuation else None
+    step_request=ticket.get("step_request") if continuation else None
+    literature=step_request if step_request and step_request["kind"]=="literature_acquisition" else None
+    invention=step_request if step_request and step_request["kind"]=="invention" else None
     if literature:
         from scisaurus.runtime.literature_collection import literature_contract
         assignment["literature_acquisition"] = literature
@@ -237,12 +281,21 @@ def run_once(root, runtime_python, *, recovery=None, continuation=None):
         assignment["scientific_software_tools"]["response"] = {"tool_action": literature_contract()}
         assignment["scientific_software_tools"]["rules"] = [literature["rule"], "Stop on the first acquisition error; no retry or fallback."]
         assignment["execution_step"] = {"mode":"one_literature_batch_then_stop", "rule":literature["rule"]}
+    if invention:
+        assignment["phase"]="invention"
+        assignment["invention_process"]=invention
+        assignment["output_contract"]=invention["output_contract"]
+        assignment["scientific_software_tools"]={"actions":{},"response":{},"rules":[
+            "This is one invention response only. No controller tools, literature retrieval or scientific execution."]}
+        actions={}
+        assignment["execution_step"]={"mode":"one_invention_response_then_stop","rules":invention["rules"]}
     project = root / "composer"
     output = project / "output"
     directory = project / "intake-controller"
     directory.mkdir(exist_ok=True)
     attempt = (Path(continuation).with_suffix(".attempt.json") if continuation else directory / "attempt.json")
     generation = uuid.uuid4().hex
+    deadline = time.monotonic() + backend["timeout_seconds"]
     # The marker and launch permission are acquired before any provider request.
     with control_lock(output):
         if attempt.exists():
@@ -253,14 +306,15 @@ def run_once(root, runtime_python, *, recovery=None, continuation=None):
         record = {"schema_version": "fresh-intake-attempt-1", "mission_id": root.name,
             "session_id": checkpoint["session_id"], "preparation_sha256": sha(canonical_bytes(checkpoint)),
             "recovery": recovery, "status": "started", "scientific_admission": "not_assessed",
-            "receipt": None, "usage": None}
+            "receipt": None, "usage": None,
+            **({"held_candidate_statuses":{identity:"held" for identity in invention["held_candidate_ids"]}} if invention else {})}
         attempt.write_bytes(canonical_bytes(record))
         save_control(output, {**control, "generation": generation, "stop_requested": False,
-                              "controller": "fresh-intake-once", "attempt": str(attempt)})
+                              "controller": "fresh-intake-once", "attempt": str(attempt),
+            **({"candidate_statuses":record["held_candidate_statuses"],"invention_policy_ref":str(continuation)} if invention else {})})
     names = ("SCISAURUS_RUN_CONTROL", "SCISAURUS_RUN_GENERATION")
     previous = {key: os.environ.get(key) for key in names}
     os.environ.update(dict(zip(names, (str(output / "run-control.json"), generation))))
-    deadline = time.monotonic() + backend["timeout_seconds"]
     try:
         if continuation:
             binding = ticket["backend_binding"]
@@ -274,11 +328,22 @@ def run_once(root, runtime_python, *, recovery=None, continuation=None):
             isolated_from=protected, required_startup_marker=FAILURE_POLICY_READY,
             forbid_reasoning=bool(continuation))
         client.deadline = deadline
-        result = client.complete(system=(root / "inputs/system-contract.txt").read_text(), prompt=json.dumps(assignment))
+        system=(root/"inputs/system-contract.txt").read_text()
+        if invention:
+            system+="\nActive phase: invention. invention_process rules and output_contract.invention " \
+                    "govern this response. The retained topic-selection phase and runtime-first planning " \
+                    "are not the active task. No scientific design, parameter, verdict or positive outcome " \
+                    "is supplied by the controller."
+        result = client.complete(system=system,prompt=json.dumps(assignment))
         record.update(receipt=result.response_metadata["receipt"], usage=result.usage)
         response = result.json_object()
         record["response"] = response
-        if set(response) == {"tool_action"}:
+        if invention:
+            from scisaurus.runtime.invention import validate_invention
+            if set(response)!={"invention"}:raise ValidationError("invention step accepts one invention response only")
+            validate_invention(response["invention"],invention,assignment["excluded_topics"])
+            record["status"]="stopped_with_unreviewed_invention"
+        elif set(response) == {"tool_action"}:
             action = response["tool_action"]
             if not isinstance(action, dict) or action.get("operation") not in actions:
                 raise ValidationError("first intake step supports only its declared source/runtime assessment tools")

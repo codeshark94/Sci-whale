@@ -19,3 +19,11 @@ Offline tests prove lifecycle, ownership, interruption recovery and request seri
 The primary returns one `collect_literature` action with one OpenAlex query per existing candidate. The controller validates every candidate and query before acquisition, performs the requests sequentially with zero retries and no anonymous fallback, and stops at the first failure. Raw provider captures and partial batch receipts remain available even when a later candidate fails. Repeated collection cannot dispatch again under the same attempt.
 
 The acquisition returns scholarly metadata, reconstructed abstracts and source locations. It does not acquire full text, select a new topic, evaluate novelty, or admit a scientific claim. The controller stops after this batch; reading results or further retrieval requires another explicit step.
+
+## Function-first invention from retained evidence
+
+`prepare-invention-step.py --root MISSION --receipt-sha256 SHA --attempt MARKER` seals one invention step from the exact latest completed literature observation. It verifies the primary receipt, complete session lineage, archived proposal, observation ownership and raw source captures. The retained candidates are marked `held` when the ticket is activated; their original text, receipts and usage remain immutable.
+
+The same primary develops unmet functions, causally distinct mechanisms, distinguishing predictions and counterexamples before considering solver or fabrication feasibility. Each direction includes a matched baseline, null, measurable quantity and units, falsifier, physical limits, strongest conventional explanation and functional separation from every held candidate. Captured literature is unreviewed evidence; missing hits cannot establish novelty. The primary may abstain.
+
+This phase permits one invention response and no controller tool operation. Invalid output, tool error, provider failure or unexpected reasoning stops without repair or redispatch. The controller validates custody and response structure only. It cannot certify novelty, physical consistency, usefulness or scientific admission. A completed response remains `unverified` until separate source-backed assessment and an authorized frozen experiment with independent validation.
