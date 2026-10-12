@@ -31,7 +31,9 @@ class IntakePrimaryClient(DshStructuredProducerClient):
         from scisaurus.runtime.structured_response import OUTPUT_RULES
         assignment=deepcopy(assignment)
         assignment['structured_output_policy']={'representation':'parsed_json_object',
-            'publication':'complete_document_write','rules':OUTPUT_RULES}
+            'publication':'complete_document_write','initial_response_state':'absent',
+            'preserved_document_input':('draft-response.json' if assignment.get('structured_continuation') else None),
+            'rules':OUTPUT_RULES}
         extra={}
         if assignment.get('structured_continuation'):
             from scisaurus.runtime.structured_recovery import continuation_files, delivered_continuation
@@ -55,17 +57,16 @@ class IntakePrimaryClient(DshStructuredProducerClient):
         return ('Your first operations must use native read to finish every current input file, '
             'including held-candidates.json when present. Continue exactly after any truncation. '
             'Before all input lines are displayed, no bash, workspace read, write or validation '
-            'operation is permitted. After input delivery, read the existing output if needed, '
-            'response.json is absent at dispatch start; preserved draft content is in immutable inputs. '
-            'construct your response and use native write for the whole response.json. '
+            'operation is permitted. response.json is absent at dispatch start. Do not read it '
+            'before your first successful native write. Preserved draft content is in immutable '
+            'inputs; use those inputs to construct the whole response and write it directly. '
             'The authoritative checker rejects publication before write on any exact contract '
             'mismatch. Then call validate_response with no arguments and stop. Do not create '
             'your own checker, run bash, stage files, delegate or retry. ' + task +
             ' Structured output policy: construct/update the parsed JSON object using '
             'structural paths, then serialize and publish the whole response.json with the native '
-            'write tool. Do not substring-edit JSON deliverables. Read an existing file before '
-            'replacing it. Local validation must assert conditions and exit nonzero on failure; '
-            'printing mismatches with exit zero is not validation. Stop on any failed check or tool.')
+            'write tool. Do not substring-edit JSON deliverables. Only after successful publication '
+            'in this attempt may you read that output before replacement. Stop on any failed check or tool.')
 
     def _task(self, assignment):
         if assignment.get('structured_continuation'):

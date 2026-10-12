@@ -7,12 +7,12 @@ from scisaurus.runtime.fresh_intake import sha
 
 OUTPUT_RULES = [
     'Construct and update the parsed JSON object using structural keys and array positions from output_contract. Serialize and write the complete response.json document; repeated field names or values are valid at different structural paths.',
-    'Do not use substring edit operations on a structured JSON deliverable. Read an existing document before replacing it, preserve meaningful authored content in the permitted fields, and use the native write tool for complete publication.',
+    'The writable response.json is absent at dispatch start. Read preserved authored content from the immutable draft input when supplied; do not read response.json before its first successful write. Publish the complete document with native write, which creates it. Only a document successfully published in this current attempt can be read before replacement. Do not use substring edit operations.',
     'Read every current input through native read before workspace work. Use the authoritative validate_response tool after complete-document publication; do not author a substitute checker or extend allowed fields. A failed check or tool ends the attempt; no automatic repair step or retry.'
 ]
 
 
-def preserved_document(receipt_path):
+def publication_evidence(receipt_path):
     """Reproduce only successful owned write/edit effects before a terminal tool error."""
     receipt_path = Path(receipt_path).resolve(); raw = receipt_path.read_bytes(); receipt = json.loads(raw)
     if (receipt.get('status') != 'result_unknown' or receipt.get('process_reaped') is not True
@@ -29,6 +29,8 @@ def preserved_document(receipt_path):
         params = json.loads(line).get('params', {}); event = params.get('event', {}); data = event.get('data', {})
         if params.get('sessionId') != receipt['session_id'] or data.get('turn') not in turns:
             continue
+        if failure is not None and event.get('type')=='step/start':
+            raise StateError('interrupted document has model steps after its terminal error')
         if event.get('type') == 'tool/call':
             if failure is not None:
                 raise StateError('interrupted document has operations after its terminal error')
@@ -45,7 +47,9 @@ def preserved_document(receipt_path):
                 if target is not None:
                     target = target.resolve() if target.is_absolute() else (output.parent/target).resolve()
                 if block.get('isError'):
-                    if call['name'] not in {'write', 'edit'} or target != output:
+                    if (target != output or call['name'] not in {'write','edit','read'}
+                            or call['name']=='read' and (document is not None
+                                or any(c['name']!='read' for c in calls.values()))):
                         raise StateError('structured continuation cannot repair this terminal failure')
                     failure = {'tool': call['name'], 'call_id': call['callId'], 'turn': call['turn'],
                         'step': call['step'], 'arguments': args, 'result': block}
@@ -61,10 +65,23 @@ def preserved_document(receipt_path):
                         raise StateError('successful edit lacks an exact deterministic match')
                     document = document.replace(old, new) if args.get('replace_all') else document.replace(old, new, 1)
                     operations.append({'tool': 'edit', 'call_id': call['callId']})
-    if failure is None or document is None:
+    if failure is None:
         raise StateError('structured continuation lacks owned partial document evidence')
+    if document is None:
+        if failure['tool']!='read' or output.exists() or output.is_symlink() or (receipt_path.parent/'outputs').exists():
+            raise StateError('unpublished response differs from its native read-only abort')
+        return {'receipt_sha256':sha(raw),'events_sha256':sha(events_raw),'document_sha256':None,
+            'publication_state':'absent','operations':[],'failure':failure},None
     body = document.encode('utf-8')
     if output.read_bytes() != body:
         raise StateError('interrupted workspace document differs from native write/edit evidence')
     return {'receipt_sha256': sha(raw), 'events_sha256': sha(events_raw), 'document_sha256': sha(body),
             'operations': operations, 'failure': failure}, body
+
+
+def preserved_document(receipt_path):
+    """Require an actual authored document; an absent output cannot supply one."""
+    metadata,body=publication_evidence(receipt_path)
+    if body is None:
+        raise StateError('structured continuation lacks owned partial document evidence')
+    return metadata,body

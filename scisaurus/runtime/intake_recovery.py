@@ -211,6 +211,7 @@ def stopped_step(root, *, receipt_sha256, attempt_path, receipt_status):
             backend=validate_batch_config(proof['backend']);verify_batch_runtime(backend)
         if receipt_status=='result_unknown' and initial_state.get('active_job'):
             session.state=initial_state
+            session.verify_history()
             lease=nullcontext(session)
         else:
             lease=session.lease(backend,time.monotonic()+2)

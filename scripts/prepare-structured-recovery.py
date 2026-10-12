@@ -13,8 +13,10 @@ def main():
     parser.add_argument('--root',required=True)
     parser.add_argument('--receipt-sha256',required=True)
     parser.add_argument('--attempt',required=True)
+    parser.add_argument('--runtime-python',help='seal the current native publication policy with the installed checker runtime')
     args=parser.parse_args()
-    print(prepare_structured_recovery(args.root,receipt_sha256=args.receipt_sha256,attempt_path=args.attempt))
+    print(prepare_structured_recovery(args.root,receipt_sha256=args.receipt_sha256,
+        attempt_path=args.attempt,runtime_python=args.runtime_python))
 
 
 if __name__=='__main__':

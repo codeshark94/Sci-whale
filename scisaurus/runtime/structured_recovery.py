@@ -13,12 +13,29 @@ from scisaurus.runtime.dsh_batch import task_json_bytes
 from scisaurus.runtime.fresh_intake import sha
 from scisaurus.runtime.intake_recovery import stopped_step, seal_stopped_step
 from scisaurus.runtime.invention_review import chunk_literals
-from scisaurus.runtime.structured_response import preserved_document, OUTPUT_RULES
+from scisaurus.runtime.structured_response import publication_evidence, OUTPUT_RULES
 
 
 def draft_evidence(context):
     if context['receipt']['status']=='result_unknown':
-        return preserved_document(context['receipt_path'])
+        metadata,body=publication_evidence(context['receipt_path'])
+        if body is not None:return metadata,body
+        source_raw,original=source_request(context)
+        if original['kind']!='concept_continuation':
+            raise StateError('unpublished continuation has no preserved input draft')
+        assignment=json.loads((context['receipt_path'].parent/'input/assignment.json').read_bytes())
+        if assignment.get('structured_continuation')!=delivered_continuation(original):
+            raise StateError('unpublished continuation changed its original draft request')
+        snapshot_path=Path(original['snapshot_path']).resolve()
+        if not snapshot_path.is_relative_to(context['project']/'intake-controller/recoveries'):
+            raise StateError('unpublished continuation has a foreign draft snapshot')
+        files=continuation_files(original)
+        if any((context['receipt_path'].parent/'input'/name).read_bytes()!=raw for name,raw in files.items()):
+            raise StateError('unpublished continuation changed its delivered input draft')
+        snapshot=json.loads(snapshot_path.read_bytes());body=base64.b64decode(snapshot['document_base64'],validate=True)
+        return {**metadata,'document_sha256':sha(body),'draft_origin':'preserved_input',
+            'input_draft':{'source_ticket_sha256':sha(source_raw),'snapshot_sha256':original['snapshot_sha256'],
+                'draft_sha256':original['draft_sha256'],'provenance':snapshot['provenance']}},body
     if context['record']['status']!='stopped_on_error' or context['receipt']['status']!='completed':
         raise StateError('structured continuation requires an owned rejected response')
     body=context['response_path'].read_bytes()
@@ -30,18 +47,28 @@ CONTINUATION_RULES = [
     'Read every current input including draft-response.json. Its literal_chunks projection preserves the interrupted authored draft and is not an accepted result. Preserve the existing capability and concept identities and continue their design under the unchanged active concept contract.',
     'Reconstruct the complete JSON object using structural keys and array positions. Preserve meaningful authored content inside the declared fields. Publish the complete response.json with the native write tool; never use substring edits on JSON deliverables.',
     'The earlier transport receipt and paid usage retain their recorded status. This explicit step does not certify the earlier draft, change the science assignment or authorize a new author, topic, source retrieval or solver.',
-    'Read an existing output before replacing it. Publish through the native exact-contract write gate, then call validate_response. Do not author a substitute checker or widen the permitted fields. Stop on failure without repair, retry or another model step.',
+    'response.json is absent at dispatch start. Do not read it before the first successful write. The preserved document is draft-response.json in the current immutable input directory. Reconstruct it there and publish directly through the native exact-contract write gate, then call validate_response. Only after current publication may the output be read before replacement. Do not author a substitute checker or widen permitted fields. Stop on failure without repair, retry or another model step.',
     'Explicit abstention is permitted if no defensible completion exists: retain the capability identities, return no final concepts and explain the limit. The interrupted concepts remain preserved in their original snapshot.'
 ]
 
 
-def recovery_request(context, snapshot_path):
+def source_request(context):
     c=context; source=c['marker'].with_name(c['marker'].name.removesuffix('.attempt.json')+'.json')
     source_raw=source.read_bytes()
     if (not source.is_relative_to(c['project']/'intake-controller/recoveries')
             or source.stem!=sha(source_raw)):
         raise StateError('structured continuation lost its original dispatch ticket')
-    original=json.loads(source_raw)['step_request']
+    ticket=json.loads(source_raw);receipt=c['receipt'];prior=receipt['development_session']['prior_receipts']
+    if (ticket['session_id']!=receipt['session_id'] or ticket['development_session']!=c['session'].binding
+            or ticket['preparation_sha256']!=sha(c['checkpoint_raw'])
+            or not prior or ticket['receipt_sha256']!=prior[-1]['sha256']
+            or sha(canonical_bytes(ticket['backend']))!=receipt['config_sha256']):
+        raise StateError('structured continuation lost its original dispatch ownership')
+    return source_raw,ticket['step_request']
+
+
+def recovery_request(context, snapshot_path):
+    c=context;source_raw,original=source_request(c)
     if original['kind']=='concept_invention':
         active=original
     elif original['kind']=='concept_continuation':
@@ -54,6 +81,8 @@ def recovery_request(context, snapshot_path):
             or assignment.get('output_contract')!=active['output_contract']
             or active['output_contract']!=concept_contract() or active['rules']!=CONCEPT_RULES):
         raise StateError('structured continuation changed its frozen concept scope')
+    if any((c['receipt_path'].parent/'input'/name).read_bytes()!=raw for name,raw in concept_files(active).items()):
+        raise StateError('structured continuation changed its delivered held catalog')
     raw=Path(snapshot_path).read_bytes(); snapshot=json.loads(raw)
     metadata,body=draft_evidence(c)
     if (Path(snapshot_path).stem!=sha(raw) or snapshot['provenance']!=metadata
@@ -71,16 +100,14 @@ def recovery_request(context, snapshot_path):
         'rules':CONTINUATION_RULES,'structured_output_rules':OUTPUT_RULES}
     request['delivered_input_sha256']={name:sha(value) for name,value in continuation_files(request).items()}
     request['prior_error']=c['record'].get('error')
-    if c['receipt']['status']=='completed':
-        from scisaurus.runtime.intake_contract import validate_response
-        from scisaurus.runtime.input_delivery import input_read_coverage
-        try:
-            from scisaurus.runtime.intake_contract import delivered_assignment
-            validate_response(delivered_assignment(c['receipt_path'].parent/'input/assignment.json'), draft)
-            request['prior_contract_error']=None
-        except ValidationError as error:
-            request['prior_contract_error']=str(error)
-        request['prior_input_read_coverage']=input_read_coverage(c['receipt_path'])
+    from scisaurus.runtime.intake_contract import delivered_assignment, validate_response
+    from scisaurus.runtime.input_delivery import input_read_coverage
+    try:
+        validate_response(delivered_assignment(c['receipt_path'].parent/'input/assignment.json'), draft)
+        request['prior_contract_error']=None
+    except ValidationError as error:
+        request['prior_contract_error']=str(error)
+    request['prior_input_read_coverage']=input_read_coverage(c['receipt_path'])
     return request
 
 
@@ -150,10 +177,10 @@ def validate_continuation(response, request):
         raise ValidationError('structured continuation changed interrupted draft identities')
 
 
-def prepare_structured_recovery(root, *, receipt_sha256, attempt_path):
+def prepare_structured_recovery(root, *, receipt_sha256, attempt_path, runtime_python=None):
     with stopped_step(root,receipt_sha256=receipt_sha256,attempt_path=attempt_path,
                       receipt_status='result_unknown') as c:
-        metadata,body=preserved_document(c['receipt_path'])
+        metadata,body=draft_evidence(c)
         snapshot={'schema_version':'stopped-structured-draft-1','provenance':metadata,
             'document_base64':base64.b64encode(body).decode('ascii'),'scientific_outcome':'unknown'}
         raw=canonical_bytes(snapshot)
@@ -176,4 +203,5 @@ def prepare_structured_recovery(root, *, receipt_sha256, attempt_path):
             control.close()
         c['state_raw']=c['session'].path.read_bytes();c['state']=json.loads(c['state_raw'])
         c['reconciliation_ref']=proof['artifact_ref']
-        return seal_stopped_step(c,request)
+        if runtime_python is None:return seal_stopped_step(c,request)
+    return seal_guarded_ticket(c,request,runtime_python)
