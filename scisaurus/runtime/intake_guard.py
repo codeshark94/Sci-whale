@@ -44,6 +44,8 @@ def guard_backend(backend, directory, runtime_python, *, work_mode=False):
             item.setdefault('config', {})['toolBash'] = False
     if work_mode:
         from scisaurus.runtime.primary_work import work_instructions
+        composition=[item for item in composition
+            if not item.get('name','').endswith('/fs-observation-policy/lib/index.js')]
         for item in composition:
             if 'persona' in item.get('config',{}):
                 item['config']['persona']=work_instructions()

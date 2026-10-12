@@ -445,6 +445,7 @@ def run_once(root, runtime_python, *, recovery=None, continuation=None):
             from scisaurus.runtime.primary_work import native_tool_handler
             lab=LaboratoryBinding.load(checkpoint['laboratory_config_path'])
             lab.attestation=load_attestation(checkpoint['laboratory_attestation_path'])
+            assignment['available_open_source_tools']=lab.context()
             client.runner.native_tool_handler=native_tool_handler(assignment,
                 SoftwareWorkbench(project/'scientific-software',deadline=deadline,laboratory=lab,
                     history_refs=[x['receipt_ref'] for x in ticket['step_request']['checkpoint']['observations']

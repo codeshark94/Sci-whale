@@ -81,10 +81,13 @@ class PrimaryWorkTests(unittest.TestCase):
             'id':'owned-message','content':[{'type':'text','text':inline_inputs(inputs) if delivery else 'partial'}]}}}}
         (job/'events.jsonl').write_text(json.dumps(event))
         result=SimpleNamespace(response_metadata={'receipt':str(rp)},usage=body['usage'],json_object=lambda:response)
-        with patch('scisaurus.runtime.fresh_intake.preflight',return_value=args),patch('scisaurus.runtime.fresh_intake.IntakePrimaryClient') as client,patch('scisaurus.runtime.fresh_intake.LaboratoryBinding.load',return_value=SimpleNamespace(attestation={})),patch('scisaurus.runtime.fresh_intake.load_attestation',return_value={}):
+        catalog={'runtimes':[{'label':'continuum','probe_modules':['established-solver'],'capabilities':['mechanical fields']}]}
+        with patch('scisaurus.runtime.fresh_intake.preflight',return_value=args),patch('scisaurus.runtime.fresh_intake.IntakePrimaryClient') as client,patch('scisaurus.runtime.fresh_intake.LaboratoryBinding.load',return_value=SimpleNamespace(attestation={},context=lambda:catalog)),patch('scisaurus.runtime.fresh_intake.load_attestation',return_value={}):
             client.return_value.runner.task_contract={};client.return_value.complete.return_value=result
             try:return run_once(root,sys.executable,continuation=ticket,recovery={'source':'offline fixture','observed_at':'2026-01-01T00:00:00Z'})
-            finally:self.assertEqual(client.return_value.complete.call_count,1)
+            finally:
+                self.assertEqual(client.return_value.complete.call_count,1)
+                self.assertEqual(json.loads(client.return_value.complete.call_args.kwargs['prompt'])['available_open_source_tools'],catalog)
 
     def test_notes_checkpoint_without_read_rounds_or_mandatory_science_format_review(self):
         ticket=self.prepare();record=self.mocked_note(ticket)
@@ -207,6 +210,21 @@ class InlineTransportTests(unittest.TestCase):
         finally:fixture.tearDown()
 
 class NativeWorkPolicyTests(unittest.TestCase):
+    def test_work_composition_keeps_native_provider_without_ephemeral_observation_gate(self):
+        import tempfile
+        from scisaurus.runtime.intake_guard import guard_backend
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);source=root/'composition.json'
+            fs={'id':'native-fs','name':'/installed/dsh/packages/fs/fs-local/lib/index.js'}
+            policy={'id':'arbitrary-policy-alias','name':'/installed/dsh/packages/fs/fs-observation-policy/lib/index.js'}
+            source.write_text(json.dumps([fs,policy]))
+            backend={'composition':str(source),'read_roots':[],'pinned_files':{}}
+            work=guard_backend(backend,root/'work',sys.executable,work_mode=True)
+            actual=json.loads(Path(work['composition']).read_bytes())
+            self.assertIn(fs,actual);self.assertNotIn(policy,actual)
+            legacy=guard_backend(backend,root/'legacy',sys.executable)
+            self.assertIn(policy,json.loads(Path(legacy['composition']).read_bytes()))
+
     def test_installed_tool_stack_advertises_and_executes_the_same_interface(self):
         import shutil,subprocess,tempfile
         from scisaurus.runtime.intake_guard import guard_backend,guarded_backend
@@ -230,7 +248,7 @@ const dir=WORKSPACE;
 const ctx=new Context();
 try{
  await ctx.plugin(SystemPrompt);await ctx.plugin(ToolRuntime);
- await ctx.plugin(LocalFileSystem,{cwd:dir});await ctx.plugin(FsPolicy);await ctx.plugin(ToolFs);
+ await ctx.plugin(LocalFileSystem,{cwd:dir});await ctx.plugin(ToolFs);
  // Global extras reproduce the previous presentation surface without running them.
  for(const name of ['bash','todo_write','subagent','read_image'])ctx.tools.register({name,description:name,parameters:{},
    output:{schema:{type:'string'},render:(_a,v)=>[{type:'text',text:v}]},execute(){throw Error('unexpected extra tool body');}});
@@ -249,6 +267,10 @@ try{
  let rejected=await call('research_run',{source:'print(1)',purpose:'scientific_computation',runtime:'runtime'});
  assert.equal(rejected.isError,true);assert.match(JSON.stringify(rejected),/input|expected/);
  let result=await call('inspect_workspace',{});assert.equal(result.isError,false);assert.equal(result.value.response_exists,false);
+ writeFileSync(join(dir,'resumed-notes.md'),'retained content');
+ result=await call('write',{file_path:join(dir,'resumed-notes.md'),content:'replaced without a ritual read'});assert.equal(result.isError,false,JSON.stringify(result));
+ result=await call('edit',{file_path:join(dir,'resumed-notes.md'),old_string:'ritual',new_string:'mandatory'});assert.equal(result.isError,false,JSON.stringify(result));
+ assert.equal(readFileSync(join(dir,'resumed-notes.md'),'utf8'),'replaced without a mandatory read');
  result=await call('write',{file_path:join(dir,'pilot/source.py'),content:'value = 1\n'});assert.equal(result.isError,false,JSON.stringify(result));
  result=await call('read',{file_path:join(dir,'pilot/source.py')});assert.equal(result.isError,false);
  result=await call('edit',{file_path:join(dir,'pilot/source.py'),old_string:'value = 1',new_string:'value = 2'});assert.equal(result.isError,false,JSON.stringify(result));
