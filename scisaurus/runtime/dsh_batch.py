@@ -307,32 +307,34 @@ class DshBatchRunner:
                "DSH_SESSION_ROOT": str(work / ".sessions"),
                "DSH_CORDIS_CONFIG": config["composition"], "DSH_MAX_TOKENS_AS_SUCCESS": "false",
                config["auth_env"]: credential}
-        surface = (self.laboratory.execution_surface(work) if self.laboratory else {})
-        env.update(surface.get("environment", {}))
-        contract_path = None
-        if self.task_contract is not None:
-            contract_path = job / 'task-contract.json'
-            manifest = {'workspace': str(work), 'output': str(work / 'response.json'),
-                'assignment': str(frozen / 'assignment.json'),
-                'inputs': {str(frozen / name): identity for name, identity in bound.items()},
-                'first_input': str(frozen / 'unread-input.txt') if 'unread-input.txt' in bound else None}
-            contract_path.write_bytes(canonical_bytes(manifest))
-            contract_path.chmod(0o444)
-            state['task_contract'] = {'path': str(contract_path), 'sha256': sha256(contract_path)}
-            save()
-            env['SCISAURUS_TASK_CONTRACT'] = str(contract_path)
-        profile = sandbox_profile(work, config["command"], allow_network=True,
-            read_only_paths=[str(frozen), *config["read_roots"], *self.runtime_read_roots,
-                             *(development.read_roots if development is not None else []),
-                             *([str(contract_path)] if contract_path is not None else []),
-                             *surface.get("read_only_paths", ())],
-            # Durable attachment storage fsyncs each ancestor directory entry.
-            # Exact directory handles do not admit file contents below them.
-            directory_sync_paths=work.parents, isolated_from=self.isolated_from, admitted_root=job)
-        # DSH supervises detached shell groups. It must be able to inspect
-        # processes and signal members of its own inherited Seatbelt domain.
-        profile += "\n(allow process-info*)\n(allow signal (target same-sandbox))\n"
         try:
+            surface = (self.laboratory.execution_surface(work) if self.laboratory else {})
+            env.update(surface.get("environment", {}))
+            contract_path = None
+            if self.task_contract is not None:
+                contract_directory = job / 'task-contract'
+                contract_directory.mkdir()
+                contract_path = contract_directory / 'manifest.json'
+                manifest = {'workspace': str(work), 'output': str(work / 'response.json'),
+                    'assignment': str(frozen / 'assignment.json'),
+                    'inputs': {str(frozen / name): identity for name, identity in bound.items()},
+                    'first_input': str(frozen / 'unread-input.txt') if 'unread-input.txt' in bound else None}
+                contract_path.write_bytes(canonical_bytes(manifest))
+                contract_path.chmod(0o444)
+                state['task_contract'] = {'path': str(contract_path), 'sha256': sha256(contract_path)}
+                save()
+                env['SCISAURUS_TASK_CONTRACT'] = str(contract_path)
+            profile = sandbox_profile(work, config["command"], allow_network=True,
+                read_only_paths=[str(frozen), *config["read_roots"], *self.runtime_read_roots,
+                                 *(development.read_roots if development is not None else []),
+                                 *([str(contract_path.parent)] if contract_path is not None else []),
+                                 *surface.get("read_only_paths", ())],
+                # Durable attachment storage fsyncs each ancestor directory entry.
+                # Exact directory handles do not admit file contents below them.
+                directory_sync_paths=work.parents, isolated_from=self.isolated_from, admitted_root=job)
+            # DSH supervises detached shell groups. It must be able to inspect
+            # processes and signal members of its own inherited Seatbelt domain.
+            profile += "\n(allow process-info*)\n(allow signal (target same-sandbox))\n"
             if time.monotonic() >= deadline:
                 raise TimeoutError("DSH batch reached its execution deadline before dispatch")
             process = start_process([SANDBOX_EXEC, "-p", profile, *config["command"]],

@@ -115,6 +115,34 @@ class IntakeContractTests(unittest.TestCase):
 
 
 class NativeInputPolicyTests(unittest.TestCase):
+    def test_batch_manifest_uses_a_directory_grant_and_setup_failure_keeps_owned_receipt(self):
+        from scisaurus.runtime.dsh_batch import DshBatchRunner,DshBatchError
+        from scisaurus.tests.test_development_session import DevelopmentSessionTests
+        fixture=DevelopmentSessionTests('test_history_workspace_and_usage_continue_across_producer_boundaries')
+        fixture.setUp()
+        try:
+            runner=DshBatchRunner(fixture.config,root=fixture.project/'contract-jobs',development_session=fixture.binding)
+            runner.task_contract={}
+            result=runner.run('offline fixture',inputs={'assignment.json':b'{}'},outputs=['answer.txt'])
+            receipt=json.loads(Path(result['receipt']).read_bytes());manifest=Path(receipt['task_contract']['path'])
+            self.assertTrue(manifest.parent.is_dir());self.assertEqual(manifest.name,'manifest.json')
+            before=(fixture.session.path if hasattr(fixture,'session') else Path(fixture.binding['root'])/'session.json')
+            state=json.loads(before.read_bytes());archives={Path(c['receipt']):Path(c['receipt']).read_bytes() for c in state['calls']}
+            failed=DshBatchRunner(fixture.config,root=fixture.project/'failed-contract-jobs',development_session=fixture.binding)
+            failed.task_contract={}
+            with patch('scisaurus.runtime.dsh_batch.sandbox_profile',side_effect=ValidationError('profile setup failed')), \
+                 patch('scisaurus.runtime.dsh_batch.start_process') as start:
+                with self.assertRaises(DshBatchError) as error:
+                    failed.run('offline fixture',inputs={'assignment.json':b'{}'},outputs=['answer.txt'])
+                start.assert_not_called()
+            path=Path(error.exception.receipt);body=json.loads(path.read_bytes())
+            self.assertEqual(body['status'],'not_dispatched');self.assertEqual(body['usage']['model_calls'],0)
+            self.assertEqual(body['development_session']['binding'],fixture.binding)
+            self.assertEqual(len(list(failed.root.glob('*/receipt.json'))),1)
+            after=json.loads(before.read_bytes());self.assertIsNone(after['active_job']);self.assertEqual(after['calls'],state['calls'])
+            self.assertTrue(all(p.read_bytes()==raw for p,raw in archives.items()))
+        finally:fixture.tearDown()
+
     def test_native_registration_uses_the_installed_raw_json_schema_contract(self):
         node=shutil.which('node') or '/Users/seungyeop/.hermes/node/bin/node'
         tools=Path('/Users/seungyeop/workspace/dsh/packages/core/tools/lib/index.js')
