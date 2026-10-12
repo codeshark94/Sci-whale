@@ -31,7 +31,7 @@ def guard_backend(backend, directory, runtime_python, *, work_mode=False):
                     date_time=(1980,1,1,0,0,0)), path.read_bytes())
     sources = {'checker.zip': buffer.getvalue(),
         **{name:(source_root/'scripts/dsh'/name).read_bytes() for name in
-           ('intake-contract.mjs','check-intake-response.py','stop-on-tool-error.mjs')}}
+           ('intake-contract.mjs','check-intake-response.py','stop-on-tool-error.mjs','research-tools.json')}}
     identity = sha(canonical_bytes({**{name:sha(raw) for name,raw in sources.items()},
         **({'mode':'primary-work'} if work_mode else {})}))
     policy = Path(directory)/identity
@@ -43,13 +43,10 @@ def guard_backend(backend, directory, runtime_python, *, work_mode=False):
         if 'toolBash' in item.get('config', {}) or 'persona' in item.get('config', {}):
             item.setdefault('config', {})['toolBash'] = False
     if work_mode:
+        from scisaurus.runtime.primary_work import work_instructions
         for item in composition:
             if 'persona' in item.get('config',{}):
-                item['config']['persona']=('You are the continuing primary researcher. Current inputs are supplied inline; '
-                    'choose the work and controller tools yourself. Use native read/write/edit for your own research files '
-                    'and inspect_workspace for directory and output existence checks. Execute computations and external '
-                    'observations through the declared controller operations. Record research notes and use actual observations. '
-                    'No stage committee, alternate author or automatic retry. Scientific review is separate.')
+                item['config']['persona']=work_instructions()
     composition.append({'id':'stop-on-tool-error','name':str((policy/'stop-on-tool-error.mjs').resolve())})
     config={'python':str(Path(runtime_python).absolute()),'checker':str((policy/'check-intake-response.py').resolve()),
             'bundle':str((policy/'checker.zip').resolve())}
@@ -79,6 +76,10 @@ def guarded_backend(backend):
         digest=sha(Path(item['name']).read_bytes())
         if digest!=backend['pinned_files'].get(item['name']) or digest!=sha((source_root/name).read_bytes()):
             raise StateError('native intake policy differs from its authoritative source')
+    interface=Path(entry['name']).parent/'research-tools.json'
+    if (backend['pinned_files'].get(str(interface))!=sha(interface.read_bytes())
+            or interface.read_bytes()!=(source_root/'research-tools.json').read_bytes()):
+        raise StateError('native tool interface differs from its authoritative source')
     return config
 
 

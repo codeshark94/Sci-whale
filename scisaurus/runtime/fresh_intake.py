@@ -27,9 +27,6 @@ class IntakePrimaryClient(DshStructuredProducerClient):
         super().__init__(*args, **kwargs)
         self.runner.task_contract = guarded_backend(self.config)
 
-    def exchange_for(self,assignment,system):
-        return getattr(self,'tool_exchange',None) if assignment.get('research_work') else None
-
     def input_files(self, assignment, system):
         from scisaurus.runtime.structured_response import OUTPUT_RULES
         assignment=deepcopy(assignment)
@@ -59,16 +56,8 @@ class IntakePrimaryClient(DshStructuredProducerClient):
 
     def task(self, assignment):
         if assignment.get('research_work'):
-            return ("Continue the same research session. The complete current inputs are delivered in "
-                "this message; read files only when useful. You own the research choices, design, code "
-                "and interpretation. Use read/write/edit for research files in your writable workspace. "
-                "Use inspect_workspace for directory and response-file existence checks; no shell tool is available. "
-                "Use the declared controller tools for computations and external observations. "
-                "Write response.json as a nonempty JSON object containing your research notes, or one "
-                "tool_action. That output starts absent; write it directly. Notes have no prescribed scientific fields. review_response returns "
-                "feedback only and is optional. A note or a successful tool is not scientific validation. "
-                "Preserve the current question and historical evidence. Do not delegate authorship. "
-                "Stop on operational errors; no automatic retries or alternate authors.")
+            from scisaurus.runtime.primary_work import work_instructions
+            return work_instructions()
         active = next((assignment[key] for key in
             ('structured_continuation','concept_invention','invention_review','invention_process','literature_acquisition')
             if assignment.get(key)), {})
@@ -340,7 +329,8 @@ def run_once(root, runtime_python, *, recovery=None, continuation=None):
     actions = assignment["scientific_software_tools"]["actions"]
     for name in (("acquire",) if work else ("acquire", "run")):
         actions.pop(name, None)
-    assignment["scientific_software_tools"]["response"]["tool_action"]["operation"] = " | ".join(actions)
+    if not work:
+        assignment["scientific_software_tools"]["response"]["tool_action"]["operation"] = " | ".join(actions)
     if not work:
         assignment["scientific_software_tools"]["rules"] = [
             "Request one declared source/runtime assessment; no installation, computation or tool retries in this step.",
@@ -437,11 +427,12 @@ def run_once(root, runtime_python, *, recovery=None, continuation=None):
             forbid_reasoning=bool(continuation))
         client.deadline = deadline
         if work:
-            client.runner.task_contract={**client.runner.task_contract,"mode":"research_work","input_delivery":"inline"}
-            from scisaurus.runtime.primary_work import tool_exchange
+            client.runner.task_contract={**client.runner.task_contract,"mode":"research_work","input_delivery":"inline",
+                "native_controller_tools":True}
+            from scisaurus.runtime.primary_work import native_tool_handler
             lab=LaboratoryBinding.load(checkpoint['laboratory_config_path'])
             lab.attestation=load_attestation(checkpoint['laboratory_attestation_path'])
-            client.tool_exchange=tool_exchange(assignment,
+            client.runner.native_tool_handler=native_tool_handler(assignment,
                 SoftwareWorkbench(project/'scientific-software',deadline=deadline,laboratory=lab,
                     history_refs=[x['receipt_ref'] for x in ticket['step_request']['checkpoint']['observations']
                                   if x.get('receipt_ref')]),record)

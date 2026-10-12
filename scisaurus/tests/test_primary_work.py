@@ -13,7 +13,7 @@ from scisaurus.runtime.fresh_intake import IntakePrimaryClient,run_once,sha
 from scisaurus.runtime.inline_inputs import inline_inputs
 from scisaurus.runtime.intake_contract import validate_response
 from scisaurus.runtime.input_delivery import verify_full_input_reads,input_read_coverage
-from scisaurus.runtime.primary_work import prepare_work_step,work_assignment,tool_exchange
+from scisaurus.runtime.primary_work import prepare_work_step,work_assignment,native_tool_handler,validate_native_action
 import scisaurus.tests.test_intake_contract as contract_tests
 
 
@@ -36,7 +36,10 @@ class PrimaryWorkTests(unittest.TestCase):
         self.assertNotIn('concept_invention',assignment);self.assertIn('run',assignment['scientific_software_tools']['actions'])
         self.assertEqual(t['step_request']['checkpoint']['response'],self.f.response)
         validate_response(assignment,{'concept_design':{'arbitrary_new_mechanism':'preserved research content'}})
-        with self.assertRaises(ValidationError):validate_response(assignment,{'tool_action':{'operation':'undeclared','arguments':{}}})
+        with self.assertRaisesRegex(ValidationError,'native research_tool'):
+            validate_response(assignment,{'tool_action':{'operation':'check_environment','arguments':{}}})
+        with self.assertRaises(ValidationError):validate_native_action(assignment,{'operation':'undeclared','arguments':{}})
+        self.assertNotIn('response',assignment['scientific_software_tools'])
         self.assertEqual(self.prepare(),ticket)
         ticket.with_suffix('.attempt.json').write_text('{}')
         with self.assertRaises(StateError):self.prepare()
@@ -44,14 +47,13 @@ class PrimaryWorkTests(unittest.TestCase):
     def test_same_owner_tool_feedback_and_failure_stop_have_no_model_fallback(self):
         t=json.loads(self.prepare().read_bytes());assignment=work_assignment(self.preflight(self.prepare())[3],t['step_request'])
         bench=Mock();bench.execute.return_value={'outcome':'ok','receipt_ref':'real-observation','raw':[1,2]};record={}
-        exchange=tool_exchange(assignment,bench,record);action={'tool_action':{'operation':'check_environment','arguments':{}}}
-        result=exchange({'response.json':canonical_bytes(action)},{'model_calls':1})
-        self.assertEqual(json.loads(result['inputs']['tool-result.json']),bench.execute.return_value)
+        execute=native_tool_handler(assignment,bench,record);action={'operation':'check_environment','arguments':{}}
+        result=execute(action)
+        self.assertEqual(result,bench.execute.return_value)
         self.assertEqual(record['observations'][0],bench.execute.return_value)
-        self.assertIsNone(exchange({'response.json':b'{"note":"new work"}'},{'model_calls':1}))
         self.assertEqual(bench.execute.call_count,1)
         bench.execute.return_value={'outcome':'result_unknown','usage':{'model_calls':2}}
-        with self.assertRaises(StateError):exchange({'response.json':canonical_bytes(action)},{'model_calls':1})
+        self.assertEqual(execute(action)['outcome'],'result_unknown')
         self.assertEqual(record['observations'][-1],bench.execute.return_value)
 
     def mocked_note(self,ticket,delivery=True):
@@ -182,7 +184,7 @@ try{
  // Global extras reproduce the previous presentation surface without running them.
  for(const name of ['bash','todo_write','subagent','read_image'])ctx.tools.register({name,description:name,parameters:{},
    output:{schema:{type:'string'},render:(_a,v)=>[{type:'text',text:v}]},execute(){throw Error('unexpected extra tool body');}});
- const input=join(dir,'assignment.json');const assignment='{"research_work":{"kind":"research_work"},"scientific_software_tools":{"actions":{}}}';writeFileSync(input,assignment);
+ const input=join(dir,'assignment.json');const assignment='{"research_work":{"kind":"research_work"},"scientific_software_tools":{"actions":{"check_environment":{}}}}';writeFileSync(input,assignment);
  const manifest=join(dir,'manifest.json');writeFileSync(manifest,JSON.stringify({workspace:dir,output:join(dir,'response.json'),
    assignment:input,inputs:{[input]:createHash('sha256').update(assignment).digest('hex')},input_delivery:'inline',mode:'research_work'}));
  process.env.SCISAURUS_TASK_CONTRACT=manifest;await ctx.plugin(Intake,CHECKER_CONFIG);
@@ -232,7 +234,7 @@ try{
 import {mkdtempSync,writeFileSync,rmSync,realpathSync,symlinkSync} from 'node:fs';import {tmpdir} from 'node:os';
 import {join} from 'node:path';import {createHash} from 'node:crypto';import assert from 'node:assert/strict';
 const {createPolicy,apply,nativeTools}=await import(PLUGIN);const dir=realpathSync(mkdtempSync(join(tmpdir(),'primary-work-')));
-try{const path=join(dir,'assignment.json');const raw=JSON.stringify({research_work:{kind:'research_work'}});
+try{const path=join(dir,'assignment.json');const raw=JSON.stringify({research_work:{kind:'research_work'},scientific_software_tools:{actions:{check_environment:{}}}});
 writeFileSync(path,raw);const manifest={workspace:dir,output:join(dir,'response.json'),assignment:path,
  inputs:{[path]:createHash('sha256').update(raw).digest('hex')},input_delivery:'inline',mode:'research_work'};
 const policy=createPolicy(manifest,JSON.parse);const agent={};

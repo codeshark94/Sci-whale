@@ -24,6 +24,8 @@ def development_session_binding(project):
 
 def _verify_receipt_files(receipt_path, receipt):
     boundaries = [("input", receipt.get("input_sha256", {}))]
+    boundaries.append(('native-tool-results', {call['response_file']: call['response_sha256']
+        for call in receipt.get('native_tool_calls', []) if call.get('status') == 'responded'}))
     boundaries.extend((turn["input_directory"], turn["input_sha256"])
                       for turn in receipt.get("turns", []))
     boundaries.extend((f"turns/{index}", turn["outputs"])

@@ -9,8 +9,18 @@ from scisaurus.runtime.intake_recovery import stopped_step
 from scisaurus.runtime.software_workbench import tool_contract,validate_readonly_action
 
 
+def native_interface():
+    return json.loads((Path(__file__).resolve().parents[2]/'scripts/dsh/research-tools.json').read_bytes())
+
+
+def work_instructions():
+    return ' '.join(native_interface()['work_instructions'])
+
+
 def work_request(context):
-    if context['record'].get('observation',{}).get('outcome')=='result_unknown':
+    observations=[context['record'].get('observation') or {},*context['record'].get('observations',[])]
+    if (any(x.get('outcome')=='result_unknown' for x in observations)
+            or any(x.get('status')=='requested' for x in context['receipt'].get('native_tool_calls',[]))):
         raise StateError('unknown tool execution requires reconciliation before further work')
     response=context['response'];source_path=context['response_path']
     if response is None:
@@ -21,11 +31,21 @@ def work_request(context):
                 if sha(raw)!=receipt['outputs']['response.json']:
                     raise StateError('last completed work changed')
                 response=json.loads(raw);break
+    calls={};failures=[]
+    for line in (context['receipt_path'].parent/'events.jsonl').read_text().splitlines():
+        row=json.loads(line);params=row.get('params',{});event=params.get('event',{});data=event.get('data',{})
+        if params.get('sessionId')!=context['state']['session_id']:continue
+        if event.get('type')=='tool/call':calls[data['callId']]=data
+        if event.get('type')=='tool/result':
+            for block in data.get('message',{}).get('content',[]):
+                if block.get('isError') and block.get('toolCallId') in calls:
+                    failures.append({'call':deepcopy(calls[block['toolCallId']]),'result':deepcopy(block)})
     return {'kind':'research_work','checkpoint':{
         'receipt_sha256':sha(context['receipt_path'].read_bytes()),
         'prior_outcome':context['receipt']['status'],
         'reported_usage':deepcopy(context['receipt']['usage']),
         'error':context['record'].get('error'),
+        'failed_native_tools':failures,
         'response_sha256':sha(source_path.read_bytes()) if response is not None else None,
         'response':deepcopy(response),
         'observation':deepcopy(context['record'].get('observation')),
@@ -34,23 +54,25 @@ def work_request(context):
 
 
 def work_assignment(original,request):
-    tools=tool_contract();tools['actions'].pop('acquire')
-    tools['response']['tool_action']['operation']=' | '.join(tools['actions'])
-    tools['rules']=['Use declared controller operations for observations; notes and tool completion are not scientific admission.']
+    tools=tool_contract();tools['actions'].pop('acquire');tools.pop('response')
+    tools['native_tool']='research_tool'
+    tools['rules']=['Call research_tool directly. Read actual observations before continuing; a successful tool is not scientific admission.']
     retired={'phase','output_contract','scientific_software_tools','execution_step','transport_feedback',
         'structured_output_policy','structured_continuation','concept_invention','invention_review',
         'invention_process','literature_acquisition'}
     return {**{key:deepcopy(value) for key,value in original.items() if key not in retired},
-        'research_work':deepcopy(request),'scientific_software_tools':tools}
+        'research_work':deepcopy(request),'scientific_software_tools':tools,
+        'native_tool_interface':deepcopy(native_interface())}
 
 
 def validate_work_response(assignment,response):
     if not isinstance(response,dict) or not response:
         raise ValidationError('research publication requires a nonempty JSON object')
-    if 'tool_action' not in response:return
-    if set(response)!={'tool_action'}:
-        raise ValidationError('tool request cannot be mixed with research notes')
-    action=response['tool_action']
+    if 'tool_action' in response:
+        raise ValidationError('Call the native research_tool; response.json contains research notes only')
+
+
+def validate_native_action(assignment,action):
     if (not isinstance(action,dict) or set(action)!={'operation','arguments'}
             or action['operation'] not in assignment['scientific_software_tools']['actions']
             or not isinstance(action['arguments'],dict)):
@@ -62,21 +84,15 @@ def review_feedback(response):
     return {'publication_interface':'valid','scientific_validation':'not_evaluated'}
 
 
-def tool_exchange(assignment,workbench,record):
-    """Deliver recorded tool feedback to the same owner; notes close the checkpoint."""
-    from scisaurus.core.schema import canonical_bytes
-    from scisaurus.runtime.intake_contract import strict_document
-    def exchange(files,usage):
-        response=strict_document(files['response.json']);validate_work_response(assignment,response)
-        if set(response)!={'tool_action'}:return None
-        observation=workbench.execute(response['tool_action'])
+def native_tool_handler(assignment,workbench,record):
+    """Execute the primary's native request without another author or prompt dispatch."""
+    def execute(action):
+        validate_native_action(assignment,action)
+        observation=workbench.execute(action)
         record.setdefault('observations',[]).append(deepcopy(observation))
-        if observation.get('outcome')!='ok':
-            raise StateError('tool execution failed or is unknown; stop without another model request')
-        workbench.retain_observation(observation)
-        return {'task':'Continue the same work from the recorded tool result. Publish notes or choose the next declared tool.',
-            'inputs':{'tool-result.json':canonical_bytes(observation)}}
-    return exchange
+        if observation.get('outcome')=='ok':workbench.retain_observation(observation)
+        return observation
+    return execute
 
 
 def prepare_work_step(root,*,receipt_sha256,attempt_path,runtime_python):

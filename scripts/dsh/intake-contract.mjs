@@ -3,16 +3,16 @@ import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { dirname, relative, resolve, sep } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { setTimeout as delay } from 'node:timers/promises';
 
 export const name = 'intake-contract';
 export const inject = ['tools'];
 export const marker = 'SCISAURUS_INTAKE_CONTRACT_READY:read-before-work-exact-publication-1';
 const hash = value => createHash('sha256').update(value).digest('hex');
+const interfaceSpec = JSON.parse(readFileSync(new URL('./research-tools.json', import.meta.url), 'utf8'));
 
 export function nativeTools(mode) {
-  return mode === 'research_work'
-    ? ['read', 'read_image', 'write', 'edit', 'inspect_workspace', 'review_response']
-    : ['read', 'write', 'inspect_workspace', 'validate_response'];
+  return [...interfaceSpec[mode === 'research_work' ? 'work_tools' : 'intake_tools']];
 }
 
 export function createPolicy(manifest, check) {
@@ -68,7 +68,7 @@ export function createPolicy(manifest, check) {
     if (!nativeTools(manifest.mode).includes(exec.name))
       return 'Tool is outside the declared native interface: ' + exec.name;
     if (['read', 'read_image', 'inspect_workspace'].includes(exec.name)) return;
-    if (exec.name === (manifest.mode==='research_work' ? 'review_response' : 'validate_response')) return;
+    if (exec.name === 'research_tool' || exec.name === (manifest.mode==='research_work' ? 'review_response' : 'validate_response')) return;
     if (manifest.mode === 'research_work' && ['write', 'edit'].includes(exec.name)) {
       if (!ownedFile(exec.arguments.file_path)) return 'Research files must remain in the owning workspace';
       if (resolve(manifest.workspace, exec.arguments.file_path ?? '') !== output) return;
@@ -115,6 +115,38 @@ export function apply(ctx, config) {
   ctx.on('agent/created', ({ agent }) => {
     agent.ctx.tools.restrict({ allow: nativeTools(manifest.mode) });
   });
+  if (manifest.mode === 'research_work') {
+    const assignment = JSON.parse(readFileSync(manifest.assignment, 'utf8'));
+    ctx.tools.register({ name: 'research_tool', description: interfaceSpec.controller_description,
+      parameters: { type: 'object', additionalProperties: false, required: ['operation', 'arguments'],
+        properties: { operation: { type: 'string', enum: Object.keys(assignment.scientific_software_tools.actions) },
+          arguments: { type: 'object', additionalProperties: true } } },
+      output: { schema: { type: 'object', additionalProperties: true },
+        render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
+      async execute(action, exec) {
+        const bridge = manifest.controller_bridge;
+        if (!bridge) throw new Error('Native controller tool has no owning execution channel');
+        const callId = String(exec.callId), sessionId = String(exec.agent.id);
+        const target = resolve(bridge.directory, hash(callId) + '.json');
+        await delay(0, undefined, { signal: exec.signal });
+        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', method: 'scisaurus/research-tool',
+          params: { channel: bridge.channel, sessionId, callId, action } }) + '\n');
+        while (Date.now() < bridge.deadline_ms) {
+          if (existsSync(target)) {
+            const reply = JSON.parse(readFileSync(target, 'utf8'));
+            if (reply.channel !== bridge.channel || reply.sessionId !== sessionId || reply.callId !== callId)
+              throw new Error('Native controller result lost its exact session/call owner');
+            if (reply.error) throw new Error(reply.error);
+            if (reply.observation?.outcome !== 'ok')
+              throw new Error('Controller tool failed or is unknown: ' + JSON.stringify(reply.observation));
+            return reply.observation;
+          }
+          await delay(50, undefined, { signal: exec.signal });
+        }
+        throw new Error('Native controller tool reached the owning attempt deadline');
+      },
+    });
+  }
   ctx.tools.register({ name: 'inspect_workspace',
     description: 'List the current writable workspace and check whether response.json exists. An absent response is normal before publication; this does not read file contents.',
     parameters: {},

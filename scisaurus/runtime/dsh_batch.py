@@ -177,6 +177,7 @@ class DshBatchRunner:
         self.required_startup_marker = required_startup_marker
         self.forbid_reasoning = forbid_reasoning
         self.task_contract = None
+        self.native_tool_handler = None
         self.laboratory = laboratory
         from scisaurus.runtime.development_session import DevelopmentSession
         self.development_session = (DevelopmentSession(development_session)
@@ -247,6 +248,9 @@ class DshBatchRunner:
         if self.task_contract and self.task_contract.get('input_delivery')=='inline':
             from scisaurus.runtime.inline_inputs import inline_inputs
             task+=inline_inputs(inputs)
+        if (self.task_contract and self.task_contract.get('native_controller_tools')
+                and not startup_only and not callable(self.native_tool_handler)):
+            raise ValidationError('native controller tools require an owning execution handler before dispatch')
         remaining = config["timeout_seconds"]
         if deadline is not None:
             remaining = min(remaining, deadline - time.monotonic())
@@ -316,6 +320,7 @@ class DshBatchRunner:
             surface = (self.laboratory.execution_surface(work) if self.laboratory else {})
             env.update(surface.get("environment", {}))
             contract_path = None
+            native_bridge = None
             if self.task_contract is not None:
                 contract_directory = job / 'task-contract'
                 contract_directory.mkdir()
@@ -326,6 +331,10 @@ class DshBatchRunner:
                     'first_input': str(frozen / 'unread-input.txt') if 'unread-input.txt' in bound else None}
                 if self.task_contract.get('input_delivery')=='inline':
                     manifest.update(input_delivery='inline',mode=self.task_contract['mode'])
+                if self.native_tool_handler is not None:
+                    from scisaurus.runtime.native_tool_bridge import NativeToolBridge
+                    native_bridge = NativeToolBridge(job, state, self.native_tool_handler, save, deadline)
+                    manifest['controller_bridge'] = native_bridge.manifest
                 contract_path.write_bytes(canonical_bytes(manifest))
                 contract_path.chmod(0o444)
                 state['task_contract'] = {'path': str(contract_path), 'sha256': sha256(contract_path)}
@@ -335,6 +344,7 @@ class DshBatchRunner:
                 read_only_paths=[str(frozen), *config["read_roots"], *self.runtime_read_roots,
                                  *(development.read_roots if development is not None else []),
                                  *([str(contract_path.parent)] if contract_path is not None else []),
+                                 *([str(native_bridge.directory)] if native_bridge is not None else []),
                                  *surface.get("read_only_paths", ())],
                 # Durable attachment storage fsyncs each ancestor directory entry.
                 # Exact directory handles do not admit file contents below them.
@@ -508,6 +518,13 @@ class DshBatchRunner:
                             buffers[name] = bytearray(tail)
                             payload = json.loads(line)
                             log.write(canonical_bytes(payload) + b"\n")
+                            if native_bridge is not None:
+                                native_bridge.observe(payload)
+                            if payload.get('method') == 'scisaurus/research-tool':
+                                if native_bridge is None:
+                                    raise ValidationError('native tool request has no owning controller')
+                                native_bridge.respond(payload)
+                                continue
                             if payload.get("error"):
                                 raise RuntimeError(f"DSH protocol error: {payload['error']}")
                             if payload.get("id") == 1:
@@ -612,9 +629,7 @@ class DshBatchRunner:
                 if path.is_file():
                     path.chmod(0o444)
             state.update(output_directory="outputs", message_id=message_id)
-            state.update(status="completed", finish_reason=finish)
-            if exchange is not None:
-                state["outcome_known"] = True
+            state.update(status="completed", finish_reason=finish, outcome_known=True)
             return {"files": files, "receipt": str(receipt), "usage": dict(state["usage"]),
                     "elapsed_seconds": time.monotonic() - start}
         except BaseException as exc:
