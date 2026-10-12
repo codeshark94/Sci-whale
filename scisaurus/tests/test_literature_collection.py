@@ -79,7 +79,7 @@ class LiteratureCollectionTests(unittest.TestCase):
             self.assertEqual(len(list(Path(directory).glob('*.json'))),2)
 
     def test_primary_task_limits_the_step_to_current_candidates_and_metadata_acquisition(self):
-        task=IntakePrimaryClient.task(None,{'literature_acquisition':{'candidate_ids':['A','B','C']}})
+        task=object.__new__(IntakePrimaryClient).task({'literature_acquisition':{'candidate_ids':['A','B','C']}})
         self.assertIn('one targeted OpenAlex query per candidate',task)
         self.assertIn('Do not make a new topic selection',task)
         self.assertIn('controller executes the batch once',task)

@@ -203,9 +203,10 @@ class InventionProcessTests(unittest.TestCase):
         self.assertFalse(input_read_coverage(self.receipt)['complete'])
 
     def test_primary_task_is_function_first_and_has_no_other_author_or_tool_operation(self):
-        task=IntakePrimaryClient.task(None,{'invention_process':{}})
+        client=object.__new__(IntakePrimaryClient)
+        task=client.task({'invention_process':{}})
         # A real request is nonempty and selects the invention task.
-        task=IntakePrimaryClient.task(None,{'invention_process':{'rules':['function first']}})
+        task=client.task({'invention_process':{'rules':['function first']}})
         self.assertIn('unmet function, distinct physical mechanisms, falsifiable predictions',task)
         self.assertIn('output_contract.invention',task)
         self.assertIn('Do not submit topic_selection or tool_action',task)

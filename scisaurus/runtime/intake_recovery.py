@@ -1,6 +1,6 @@
 """Explicit accounting and transport repair for a stopped primary intake."""
 from copy import deepcopy
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import json
 from pathlib import Path
 
@@ -157,8 +157,8 @@ def prepare_continuation(root, *, receipt_sha256, attempt_path=None):
 
 
 @contextmanager
-def completed_step(root, *, receipt_sha256, attempt_path):
-    """Verify and lease the exact completed predecessor without changing its history."""
+def stopped_step(root, *, receipt_sha256, attempt_path, receipt_status):
+    """Verify the exact stopped frontier; unsettled owners require official reconciliation."""
     from scisaurus.runtime.development_session import _verify_receipt_files
     import time
     root = Path(root).resolve()
@@ -195,40 +195,65 @@ def completed_step(root, *, receipt_sha256, attempt_path):
             raise StateError('completed backend has a foreign owner')
         backend = validate_batch_config(json.loads(binding_path.read_bytes())['backend'])
         verify_batch_runtime(backend)
-        with session.lease(backend,time.monotonic()+2):
+        initial_state=json.loads(session.path.read_bytes())
+        if receipt_status=='result_unknown' and initial_state.get('active_job'):
+            session.state=initial_state
+            lease=nullcontext(session)
+        else:
+            lease=session.lease(backend,time.monotonic()+2)
+        with lease:
             state_raw=session.path.read_bytes(); state=session.state
-            if (not state['calls'] or state['calls'][-1]['sha256']!=receipt_sha256
-                    or state['calls'][-1]['receipt']!=record['receipt']
+            frontier=state.get('active_job') or (state['calls'][-1]['receipt'] if state['calls'] else None)
+            if (frontier!=record['receipt'] or sha(Path(frontier).read_bytes())!=receipt_sha256
+                    or state.get('binding')!=session.binding
+                    or state.get('config_sha256')!=sha(canonical_bytes(backend))
                     or record['session_id']!=state['session_id']
                     or record['preparation_sha256']!=sha(checkpoint_raw)):
                 raise StateError('completed step requires its exact latest primary receipt')
             receipt_path=Path(record['receipt']).resolve(); receipt_raw=receipt_path.read_bytes()
             receipt=json.loads(receipt_raw)
-            if (sha(receipt_raw)!=receipt_sha256 or receipt.get('status')!='completed'
+            if (sha(receipt_raw)!=receipt_sha256 or receipt.get('status')!=receipt_status
                     or record.get('usage')!=receipt.get('usage')
+                    or receipt.get('session_id')!=state['session_id']
+                    or receipt.get('config_sha256')!=state['config_sha256']
+                    or receipt.get('development_session',{}).get('binding')!=session.binding
+                    or receipt.get('job_directory')!=str(receipt_path.parent)
+                    or receipt.get('process_reaped') is not True
                     or not receipt_path.is_relative_to(project/'intake-jobs')):
                 raise StateError('predecessor is not an owned completed result')
             _verify_receipt_files(receipt_path,receipt)
             response_path=receipt_path.parent/'outputs/response.json'
-            response=json.loads(response_path.read_bytes())
-            if record.get('response')!=response or receipt['outputs']['response.json']!=sha(response_path.read_bytes()):
-                raise StateError('completed predecessor lost its exact response')
+            response=None
+            if receipt_status=='completed':
+                response=json.loads(response_path.read_bytes())
+                if record.get('response')!=response or receipt['outputs']['response.json']!=sha(response_path.read_bytes()):
+                    raise StateError('completed predecessor lost its exact response')
             yield {'root':root,'project':project,'checkpoint_raw':checkpoint_raw,'session':session,
                 'state_raw':state_raw,'state':state,'control_raw':control_raw,'marker':marker,
                 'record':record,'binding_path':binding_path,'backend':backend,'receipt_path':receipt_path,
                 'receipt':receipt,'response_path':response_path,'response':response}
 
 
-def seal_completed_step(context, request):
+@contextmanager
+def completed_step(root, *, receipt_sha256, attempt_path):
+    with stopped_step(root, receipt_sha256=receipt_sha256, attempt_path=attempt_path,
+                      receipt_status='completed') as context:
+        yield context
+
+
+def seal_stopped_step(context, request):
     """Publish one control-only ticket; a consumed marker cannot grant another dispatch."""
-    c=context; state=c['state']; identity=state['calls'][-1]['sha256']
+    c=context; state=c['state']; identity=state['calls'][-1]['sha256']; status=c['receipt']['status']
     body={'schema_version':'explicit-intake-continuation-1','session_id':state['session_id'],
         'development_session':c['session'].binding,'preparation_sha256':sha(c['checkpoint_raw']),
         'session_sha256':sha(c['state_raw']),'control_sha256':sha(c['control_raw']),
-        'receipt_sha256':identity,'prior_receipt_status':'completed','backend':c['backend'],
+        'receipt_sha256':identity,'prior_receipt_status':status,'backend':c['backend'],
         'backend_binding':str(c['binding_path']),'backend_binding_sha256':sha(c['binding_path'].read_bytes()),
-        'step_request':request,'feedback':{'prior_outcome':'completed but not scientifically admitted',
-            'reported_usage':c['receipt']['usage'],'step':request['kind']+' then stop'}}
+        **({'reconciliation_ref':c['reconciliation_ref']} if c.get('reconciliation_ref') else {}),
+        'step_request':request,'feedback':{'prior_outcome':('completed but not scientifically admitted' if status=='completed'
+            else 'unknown; no scientific output accepted'),'reported_usage':c['receipt']['usage'],
+            **({'billing_completeness':'partial_unfinalized'} if status=='result_unknown' else {}),
+            'step':request['kind']+' then stop'}}
     raw=canonical_bytes(body); directory=c['project']/'intake-controller/recoveries'/identity
     directory.mkdir(parents=True,exist_ok=True); path=directory/(sha(raw)+'.json')
     if path.with_suffix('.attempt.json').exists():raise StateError('completed step already consumed; no automatic retry')
@@ -254,7 +279,7 @@ def prepare_literature_step(root, *, receipt_sha256, attempt_path):
         assignment=json.loads((c['receipt_path'].parent/'input/assignment.json').read_bytes())
         validate_proposal(proposal,assignment)
         if not proposal['candidates']:raise StateError('literature acquisition requires existing candidates')
-        return seal_completed_step(c,{'kind':'literature_acquisition','proposal_path':str(c['response_path']),
+        return seal_stopped_step(c,{'kind':'literature_acquisition','proposal_path':str(c['response_path']),
             'proposal_sha256':sha(c['response_path'].read_bytes()),'candidate_ids':[x['id'] for x in proposal['candidates']],
             'candidate_literal_chunks':candidate_chunks(proposal['candidates']),
             'rule':'Keep these candidates unchanged. Choose one targeted literature query per candidate '
@@ -289,18 +314,18 @@ def prepare_invention_step(root, *, receipt_sha256, attempt_path):
             'held_candidate_literal_chunks':candidate_chunks(proposal['candidates']),
             'observation_path':observation['receipt'],'observation_sha256':observation['receipt_sha256'],
             'retained_source_metadata':sources,'output_contract':invention_contract(),'rules':INVENTION_RULES}
-        return seal_completed_step(c,request)
+        return seal_stopped_step(c,request)
 
 
 def prepare_invention_review(root, *, receipt_sha256, attempt_path):
     """Seal one explicitly authorized review without changing the completed predecessor."""
     from scisaurus.runtime.invention_review import review_request
     with completed_step(root, receipt_sha256=receipt_sha256, attempt_path=attempt_path) as context:
-        return seal_completed_step(context, review_request(context))
+        return seal_stopped_step(context, review_request(context))
 
 
 def prepare_concept_step(root, *, receipt_sha256, attempt_path):
     """Seal one capability-led concept design from the current stopped primary frontier."""
     from scisaurus.runtime.concept_invention import concept_request
     with completed_step(root, receipt_sha256=receipt_sha256, attempt_path=attempt_path) as context:
-        return seal_completed_step(context, concept_request(context))
+        return seal_stopped_step(context, concept_request(context))

@@ -259,7 +259,7 @@ class ExplicitPreparationTests(IntakeAccountingTests):
 class IntakeResponseDeliveryTests(unittest.TestCase):
     def test_task_names_current_input_schema_and_writable_response_without_controller_search(self):
         from scisaurus.runtime.fresh_intake import IntakePrimaryClient
-        task = IntakePrimaryClient.task(None, {})
+        task = object.__new__(IntakePrimaryClient).task({})
         self.assertIn('scientific_software_tools.response',task)
         self.assertIn('output_contract.topic_selection',task)
         self.assertIn('response.json directly in the declared writable workspace',task)

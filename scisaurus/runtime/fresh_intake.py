@@ -22,11 +22,21 @@ FAILURE_POLICY_READY = "SCISAURUS_TOOL_FAILURE_POLICY_READY:cancel-owning-agent-
 
 class IntakePrimaryClient(DshStructuredProducerClient):
     def input_files(self, assignment, system):
+        from scisaurus.runtime.structured_response import OUTPUT_RULES
+        assignment=deepcopy(assignment)
+        assignment['structured_output_policy']={'representation':'parsed_json_object',
+            'publication':'complete_document_write','rules':OUTPUT_RULES}
+        extra={}
+        if assignment.get('structured_continuation'):
+            from scisaurus.runtime.structured_recovery import continuation_files, delivered_continuation
+            recovery=assignment['structured_continuation']
+            extra=continuation_files(recovery)
+            assignment['structured_continuation']=delivered_continuation(recovery)
         if assignment.get('concept_invention'):
             from scisaurus.runtime.concept_invention import concept_files, delivered_request
             request=assignment['concept_invention']
             value=deepcopy(assignment);value['concept_invention']=delivered_request(request)
-            return {**super().input_files(value,system),**concept_files(request)}
+            return {**super().input_files(value,system),**concept_files(request),**extra}
         if assignment.get('invention_review'):
             from scisaurus.runtime.invention_review import review_files, delivered_request
             request=assignment['invention_review']
@@ -35,6 +45,31 @@ class IntakePrimaryClient(DshStructuredProducerClient):
         return super().input_files(assignment,system)
 
     def task(self, assignment):
+        task=self._task(assignment)
+        return task + (' Structured output policy: construct/update the parsed JSON object using '
+            'structural paths, then serialize and publish the whole response.json with the native '
+            'write tool. Do not substring-edit JSON deliverables. Read an existing file before '
+            'replacing it. Local validation must assert conditions and exit nonzero on failure; '
+            'printing mismatches with exit zero is not validation. Stop on any failed check or tool.')
+
+    def _task(self, assignment):
+        if assignment.get('structured_continuation'):
+            return (
+                "Continue the same primary session from its preserved interrupted concept draft. "
+                "Read every line of assignment.json, system-contract.txt, held-candidates.json and "
+                "draft-response.json from the current input directory. Concatenate literal_chunks "
+                "objects without changing characters; continue from the exact next unread line after "
+                "truncation. The draft is unaccepted and its earlier receipt stays unknown with paid "
+                "usage retained. Follow structured_continuation.rules. Complete the preserved capability "
+                "and concept identities under the unchanged concept_invention output contract; do not "
+                "start a new invention search or discard the authored scientific content. Reconstruct "
+                "the JSON object by structural paths, placing meaningful content in the permitted fields, "
+                "then write the whole response.json document with the native write tool. Never use "
+                "substring edits on JSON. Explicit abstention is permitted with preserved capability "
+                "identities, no final concepts and stated limits; the original draft stays preserved. "
+                "Do not retrieve sources, run a solver, install tools, delegate "
+                "authorship, retry a failed tool or continue after a failed local assertion. Return one "
+                "concept_design response and stop without scientific admission or automatic redispatch.")
         if assignment.get('concept_invention'):
             return (
                 "Continue the same primary session and preserve its history. Read every line of "
@@ -162,7 +197,7 @@ def preflight(root, runtime_python, *, continuation=None):
             raise StateError("intake continuation changed its predecessor terminal status")
     if ticket and ticket.get("step_request"):
         request=ticket["step_request"]; kind=request.get("kind")
-        if ticket.get("prior_receipt_status")!="completed":
+        if ticket.get("prior_receipt_status")!="completed" and kind!='concept_continuation':
             raise StateError("research step requires a completed predecessor")
         if kind=="literature_acquisition":
             path=Path(request["proposal_path"]).resolve()
@@ -218,6 +253,17 @@ def preflight(root, runtime_python, *, continuation=None):
                                 attempt_path=current_control['attempt']) as context:
                 if request!=concept_request(context):
                     raise StateError('concept imagination changed its held history or process contract')
+        elif kind=='concept_continuation':
+            from scisaurus.runtime.intake_recovery import stopped_step
+            from scisaurus.runtime.structured_recovery import recovery_request
+            if (ticket.get('prior_receipt_status')!='result_unknown'
+                    or ticket.get('reconciliation_ref')!=state['calls'][-1].get('reconciliation_ref')):
+                raise StateError('structured continuation requires exact paid-unknown accounting')
+            current_control=read_control(project/'output')
+            with stopped_step(root,receipt_sha256=ticket['receipt_sha256'],
+                              attempt_path=current_control['attempt'],receipt_status='result_unknown') as context:
+                if request!=recovery_request(context,request['snapshot_path']):
+                    raise StateError('structured continuation changed its interrupted scope or draft')
         else:raise StateError("unsupported explicit research step")
     if not Path(runtime_python).is_file():
         raise StateError("intake requires an installed Python runtime")
@@ -336,6 +382,10 @@ def run_once(root, runtime_python, *, recovery=None, continuation=None):
                 "The controller records one response and at most one tool observation, then stops. "
                 "Installation and scientific computation require a later frozen pilot; no repair model is called."}
     step_request=ticket.get("step_request") if continuation else None
+    resume=step_request if step_request and step_request['kind']=='concept_continuation' else None
+    if resume:
+        assignment['structured_continuation']=resume
+        step_request=resume['active_request']
     literature=step_request if step_request and step_request["kind"]=="literature_acquisition" else None
     invention=step_request if step_request and step_request["kind"]=="invention" else None
     review=step_request if step_request and step_request['kind']=='invention_review' else None
@@ -433,6 +483,11 @@ def run_once(root, runtime_python, *, recovery=None, continuation=None):
             system+='certification or executed results. The retained candidates are held negative '
             system+='constraints. No specific concept, scientific design, coefficient or positive '
             system+='outcome is supplied by the controller.'
+        if resume:
+            system+='\nActive task refinement: structured_continuation.rules govern this explicitly '
+            system+='authorized continuation. Complete the preserved unaccepted draft identities under '
+            system+='the unchanged concept contract. Do not generate a new topic or discard the draft. '
+            system+='Its original unknown outcome and paid usage remain preserved.'
         result = client.complete(system=system,prompt=json.dumps(assignment))
         record.update(receipt=result.response_metadata["receipt"], usage=result.usage)
         response = result.json_object()
@@ -443,6 +498,9 @@ def run_once(root, runtime_python, *, recovery=None, continuation=None):
             if set(response)!={'concept_design'}:
                 raise ValidationError('concept imagination accepts one concept_design response only')
             validate_concepts(response['concept_design'],concept,assignment['excluded_topics'])
+            if resume:
+                from scisaurus.runtime.structured_recovery import validate_continuation
+                validate_continuation(response,resume)
             record['input_read_coverage']=verify_full_input_reads(record['receipt'])
             record['status']='stopped_with_unreviewed_concepts'
         elif review:
