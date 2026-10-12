@@ -27,6 +27,19 @@ class IntakePrimaryClient(DshStructuredProducerClient):
         super().__init__(*args, **kwargs)
         self.runner.task_contract = guarded_backend(self.config)
 
+    def output_name(self, assignment):
+        if assignment.get('research_work'):
+            return 'research-transcript.md'
+        return super().output_name(assignment)
+
+    def decode_response(self, assignment, files):
+        if assignment.get('research_work'):
+            response = {'notes': files['research-transcript.md'].decode('utf-8')}
+            if 'research-notes.md' in files:
+                response['workspace_notes'] = files['research-notes.md'].decode('utf-8')
+            return response
+        return super().decode_response(assignment, files)
+
     def input_files(self, assignment, system):
         from scisaurus.runtime.structured_response import OUTPUT_RULES
         assignment=deepcopy(assignment)
@@ -476,7 +489,7 @@ def run_once(root, runtime_python, *, recovery=None, continuation=None):
             record['review_feedback']=review_feedback(response)
         else:
             record['publication_check'] = verify_publication(record['receipt'])
-        if work and set(response)!={'tool_action'}:
+        if work:
             record['status']='stopped_with_research_progress'
         elif concept:
             from scisaurus.runtime.input_delivery import verify_full_input_reads

@@ -488,16 +488,29 @@ class SoftwareWorkbenchTests(unittest.TestCase):
         self.assertEqual(result["execution"]["stderr"], "missing dependency")
         self.assertEqual(result["action"]["arguments"]["input"], {"parameter":2})
 
-    def test_parse_failure_keeps_successful_process_diagnostics(self):
+    def test_unstructured_stdout_is_a_recorded_computation_not_a_parse_failure(self):
         _, _, docs, installed = self.provision()
         self.workbench.runner = lambda *args, **kwargs: SandboxResult(0, b"solver progress\nnot JSON", b"units warning", False, False, "sandbox-exec")
         with patch("scisaurus.runtime.software_workbench.sandbox_status", return_value={"mode":"sandbox-exec"}):
             result = self.action("run", environment_ref=installed["receipt_ref"], source="bad adapter", input={},
                                  purpose="scientific_computation", documentation_refs=[docs["receipt_ref"]], expected=None)
-        self.assertEqual(result["outcome"], "failed")
-        self.assertEqual(result["execution"]["returncode"], 0)
-        self.assertEqual(result["execution"]["stdout"], "solver progress\nnot JSON")
-        self.assertEqual(result["execution"]["stderr"], "units warning")
+        self.assertEqual(result["outcome"], "ok")
+        self.assertEqual(result["result"]["execution"]["returncode"], 0)
+        self.assertEqual(result["result"]["execution"]["stdout"], "solver progress\nnot JSON")
+        self.assertEqual(result["result"]["execution"]["stderr"], "units warning")
+        self.assertIsNone(result['result']['output'])
+        self.assertIsNone(result['result']['expected_matches'])
+        self.assertEqual(result['result']['output_format'],'text')
+        self.assertEqual(result['result']['scientific_admission'],'not_assessed')
+
+    def test_unstructured_stdout_cannot_satisfy_a_requested_reference_comparison(self):
+        _, _, docs, installed = self.provision()
+        self.workbench.runner = lambda *args, **kwargs: SandboxResult(0,b'raw result',b'',False,False,'sandbox-exec')
+        with patch('scisaurus.runtime.software_workbench.sandbox_status',return_value={'mode':'sandbox-exec'}):
+            result=self.action('run',environment_ref=installed['receipt_ref'],source='raw computation',input={},
+                purpose='upstream_example',documentation_refs=[docs['receipt_ref']],
+                expected={'value':{'answer':42},'absolute_tolerance':0,'relative_tolerance':0})
+        self.assertEqual(result['outcome'],'failed');self.assertEqual(result['execution']['stdout'],'raw result')
 
     def test_failed_search_cannot_admit_custom_model(self):
         response = selection_contract()

@@ -36,8 +36,8 @@ class PrimaryWorkTests(unittest.TestCase):
         self.assertNotIn('concept_invention',assignment);self.assertIn('run',assignment['scientific_software_tools']['actions'])
         self.assertEqual(t['step_request']['checkpoint']['response'],self.f.response)
         validate_response(assignment,{'concept_design':{'arbitrary_new_mechanism':'preserved research content'}})
-        with self.assertRaisesRegex(ValidationError,'native research_tool'):
-            validate_response(assignment,{'tool_action':{'operation':'check_environment','arguments':{}}})
+        validate_response(assignment,{'tool_action':{'operation':'check_environment','arguments':{}}})
+        validate_response(assignment,'# Unstructured research notes\nNo output schema.')
         with self.assertRaises(ValidationError):validate_native_action(assignment,{'operation':'undeclared','arguments':{}})
         self.assertNotIn('response',assignment['scientific_software_tools'])
         self.assertEqual(self.prepare(),ticket)
@@ -56,15 +56,24 @@ class PrimaryWorkTests(unittest.TestCase):
         self.assertEqual(execute(action)['outcome'],'result_unknown')
         self.assertEqual(record['observations'][-1],bench.execute.return_value)
 
-    def mocked_note(self,ticket,delivery=True):
+    def mocked_note(self,ticket,delivery=True,notes=None,workspace_notes=None):
         args=self.preflight(ticket);root,cp,backend,assignment,protected=args;t=json.loads(ticket.read_bytes())
         assignment=work_assignment(assignment,t['step_request']);stub=object.__new__(IntakePrimaryClient);inputs=stub.input_files(assignment,'primary work')
         job=self.owner.project/'intake-jobs/lean-completed';(job/'input').mkdir(parents=True);(job/'outputs').mkdir()
         for name,raw in inputs.items():(job/'input'/name).write_bytes(raw)
-        response={'note':'An unfinished mechanism with arbitrary prose; no scientific success claimed.'};(job/'outputs/response.json').write_bytes(canonical_bytes(response))
+        response={'note':'An unfinished mechanism with arbitrary prose; no scientific success claimed.'}
+        output_name='research-transcript.md' if notes is not None else 'response.json'
+        raw=notes.encode() if notes is not None else canonical_bytes(response)
+        if notes is not None:response={'notes':notes}
+        (job/'outputs'/output_name).write_bytes(raw)
+        output_hashes={output_name:sha(raw)}
+        if workspace_notes is not None:
+            (job/'outputs/research-notes.md').write_text(workspace_notes)
+            output_hashes['research-notes.md']=sha(workspace_notes.encode())
+            response['workspace_notes']=workspace_notes
         state=json.loads(self.owner.session.path.read_bytes());body=deepcopy(json.loads(self.f.receipt.read_bytes()))
         body.update(job_directory=str(job),config_sha256=state['config_sha256'],message_id='owned-message',
-            input_sha256={n:sha(v) for n,v in inputs.items()},outputs={'response.json':sha((job/'outputs/response.json').read_bytes())},
+            input_sha256={n:sha(v) for n,v in inputs.items()},outputs=output_hashes,
             development_session={'binding':self.owner.binding,'prior_receipts':state['calls']})
         manifest=job/'manifest.json';manifest.write_bytes(canonical_bytes({'input_delivery':'inline','mode':'research_work','inputs':{str(job/'input'/name):sha(raw) for name,raw in inputs.items()}}))
         body['task_contract']={'path':str(manifest),'sha256':sha(manifest.read_bytes())};rp=job/'receipt.json';rp.write_bytes(canonical_bytes(body))
@@ -83,6 +92,47 @@ class PrimaryWorkTests(unittest.TestCase):
         self.assertEqual(record['input_read_coverage']['delivery'],'inline');self.assertNotIn('publication_check',record)
         self.assertTrue(json.loads((self.owner.project/'output/run-control.json').read_bytes())['stop_requested'])
         self.assertEqual(json.loads(self.owner.session.path.read_bytes())['calls'],json.loads(self.before)['calls'])
+
+    def test_plain_notes_are_archived_and_read_by_the_next_checkpoint(self):
+        from scisaurus.runtime.primary_work import checkpoint_response
+        notes='# Mechanism\nA draft with math: F ~ h².\n```python\nprint("observation")\n```\n'
+        ticket=self.prepare();record=self.mocked_note(ticket,notes=notes)
+        receipt_path=Path(record['receipt']);receipt=json.loads(receipt_path.read_bytes())
+        path,response=checkpoint_response(receipt_path,receipt)
+        self.assertEqual(path.name,'research-transcript.md');self.assertEqual(path.read_text(),notes)
+        self.assertEqual(response,{'notes':notes});self.assertEqual(record['response'],response)
+        self.assertEqual(record['status'],'stopped_with_research_progress')
+        self.assertEqual(record['scientific_admission'],'not_assessed')
+        path.write_text(notes+'changed')
+        with self.assertRaises(StateError):checkpoint_response(receipt_path,receipt)
+
+    def test_transcript_and_optional_notes_reach_the_next_prepared_step(self):
+        ticket=self.prepare();record=self.mocked_note(ticket,notes='',workspace_notes='# Mechanics\nAn unvalidated result.')
+        receipt_path=Path(record['receipt']);receipt=json.loads(receipt_path.read_bytes())
+        state_path=self.owner.session.path;state=json.loads(state_path.read_bytes())
+        state['calls'].append({'receipt':str(receipt_path),'sha256':sha(receipt_path.read_bytes()),'usage':receipt['usage']})
+        state_path.write_bytes(canonical_bytes(state));prior=state_path.read_bytes();receipt_raw=receipt_path.read_bytes()
+        next_ticket=prepare_work_step(self.owner.root,receipt_sha256=sha(receipt_raw),
+            attempt_path=ticket.with_suffix('.attempt.json'),runtime_python=sys.executable)
+        self.preflight(next_ticket)
+        next_step=json.loads(next_ticket.read_bytes())['step_request']
+        self.assertEqual(next_step['checkpoint']['response'],{'notes':'','workspace_notes':'# Mechanics\nAn unvalidated result.'})
+        self.assertEqual(receipt_path.read_bytes(),receipt_raw)
+        self.assertEqual(json.loads(state_path.read_bytes())['calls'],json.loads(prior)['calls'])
+        self.assertTrue(json.loads((self.owner.project/'output/run-control.json').read_bytes())['stop_requested'])
+
+    def test_primary_client_records_plain_text_without_json_repair_or_extra_call(self):
+        from scisaurus.runtime.models import ModelResult
+        client=object.__new__(IntakePrimaryClient);client.runtime_python=sys.executable
+        client.timeout_seconds=30;client.model='offline-fixture';client.config={}
+        client.runner=Mock()
+        notes='Unstructured notes with ```code``` and an unfinished JSON sketch: {\n'
+        client.runner.run.return_value={'files':{'research-transcript.md':notes.encode(),'research-notes.md':b'# Optional detail'},
+            'receipt':'offline-receipt','usage':{'model_calls':1},'elapsed_seconds':.1}
+        result=client.complete(system='work',prompt=json.dumps({'research_work':{'kind':'research_work'}}))
+        self.assertIsInstance(result,ModelResult);self.assertEqual(result.json_object(),{'notes':notes,'workspace_notes':'# Optional detail'})
+        self.assertEqual(client.runner.run.call_count,1)
+        self.assertEqual(client.runner.run.call_args.kwargs['outputs'],['research-transcript.md'])
 
     def test_missing_inline_delivery_stops_without_second_call(self):
         ticket=self.prepare()
@@ -206,10 +256,18 @@ try{
  result=await call('write',{file_path:join(dir,'response.json'),content:'{"note":"unadmitted checkpoint"}'});
  assert.equal(result.isError,false,JSON.stringify(result));
  result=await call('inspect_workspace',{});assert.equal(result.value.response_exists,true);
- result=await call('review_response',{});assert.equal(result.isError,false);assert.equal(result.value.validated,true);
+ result=await call('review_response',{});assert.equal(result.isError,false);assert.equal(result.value.notes_file_present,true);
  result=await call('read',{file_path:join(dir,'response.json')});assert.equal(result.isError,false);
- result=await call('write',{file_path:join(dir,'response.json'),content:'{"broken":'});assert.equal(result.isError,true);
- assert.equal(readFileSync(join(dir,'response.json'),'utf8'),'{"note":"unadmitted checkpoint"}');
+ result=await call('edit',{file_path:join(dir,'response.json'),old_string:'unadmitted checkpoint',new_string:'corrected checkpoint'});
+ assert.equal(result.isError,false,JSON.stringify(result));
+ assert.equal(JSON.parse(readFileSync(join(dir,'response.json'),'utf8')).note,'corrected checkpoint');
+ result=await call('write',{file_path:join(dir,'response.json'),content:'{"broken":'});assert.equal(result.isError,false);
+ result=await call('review_response',{});assert.equal(result.isError,false);
+ result=await call('write',{file_path:join(dir,'research-notes.md'),content:'# Notes\nA free-form sketch {\n'});
+ assert.equal(result.isError,false,JSON.stringify(result));
+ result=await call('edit',{file_path:join(dir,'research-notes.md'),old_string:'sketch',new_string:'mechanism'});
+ assert.equal(result.isError,false,JSON.stringify(result));
+ assert.equal(readFileSync(join(dir,'research-notes.md'),'utf8'),'# Notes\nA free-form mechanism {\n');
  result=await call('bash',{command:'anything'});assert.equal(result.isError,true);
  assert(!advertised.includes('bash'));assert(!advertised.includes('subagent'));
  console.log(JSON.stringify({advertised,source_write_read_edit:true,workspace_inspection:true,provider_requests:0}));
@@ -249,7 +307,8 @@ assert.equal(policy.guard({name:'review_response',agent,arguments:{}}),undefined
 assert.match(policy.guard({name:'bash',agent,arguments:{command:'other author'}}),/declared native interface/);
 assert.equal(policy.guard({name:'write',agent,arguments:{file_path:join(dir,'pilot/source.py'),content:'source'}}),undefined);
 assert.equal(policy.guard({name:'edit',agent,arguments:{file_path:join(dir,'source.py')}}),undefined);
-assert.match(policy.guard({name:'edit',agent,arguments:{file_path:manifest.output}}),/complete document/);
+assert.equal(policy.guard({name:'edit',agent,arguments:{file_path:manifest.output}}),undefined);
+assert.equal(policy.guard({name:'write',agent,arguments:{file_path:manifest.output,content:'unstructured { notes'}}),undefined);
 assert.match(policy.guard({name:'write',agent,arguments:{file_path:join(dir,'../foreign.py'),content:'source'}}),/owning workspace/);
 symlinkSync('/tmp',join(dir,'escape'));
 assert.match(policy.guard({name:'write',agent,arguments:{file_path:join(dir,'escape/source.py'),content:'source'}}),/owning workspace/);
@@ -257,7 +316,8 @@ symlinkSync('/tmp/missing-scisaurus-native-file',join(dir,'dangling'));
 assert.match(policy.guard({name:'write',agent,arguments:{file_path:join(dir,'dangling'),content:'source'}}),/owning workspace/);
 const mp=join(dir,'manifest.json');writeFileSync(mp,JSON.stringify(manifest));process.env.SCISAURUS_TASK_CONTRACT=mp;
 let registered,inspect,created;apply({tools:{guard(){},register(value){registered=value;if(value.name==='inspect_workspace')inspect=value;}},on(name,callback){if(name==='agent/created')created=callback;}},{});
-assert.equal(registered.name,'review_response');assert.match(registered.description,/independent scientific review/);
+assert.equal(registered.name,'review_response');assert.match(registered.description,/No file or output format/);
+assert.equal(registered.execute().notes_file_present,false);assert.equal(registered.execute().sha256,null);
 let mask;created({agent:{ctx:{tools:{restrict(value){mask=value;}}}}});assert.deepEqual(mask.allow,nativeTools('research_work'));
 assert(!mask.allow.includes('bash'));assert(!mask.allow.includes('todo_write'));
 assert.equal(inspect.execute().response_exists,false);

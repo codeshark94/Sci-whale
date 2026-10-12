@@ -325,7 +325,8 @@ class DshBatchRunner:
                 contract_directory = job / 'task-contract'
                 contract_directory.mkdir()
                 contract_path = contract_directory / 'manifest.json'
-                manifest = {'workspace': str(work), 'output': str(work / 'response.json'),
+                manifest = {'workspace': str(work),
+                    'output': str(work / ('research-notes.md' if self.task_contract.get('mode') == 'research_work' else 'response.json')),
                     'assignment': str(frozen / 'assignment.json'),
                     'inputs': {str(frozen / name): identity for name, identity in bound.items()},
                     'first_input': str(frozen / 'unread-input.txt') if 'unread-input.txt' in bound else None}
@@ -449,7 +450,28 @@ class DshBatchRunner:
                 if {name: sha256(directory / name) for name in hashes} != hashes:
                     raise RuntimeError("DSH job changed frozen task files")
             files = {}
+            if self.task_contract and self.task_contract.get('mode') == 'research_work' and 'research-transcript.md' in outputs:
+                messages, seen = [], set()
+                turns = {identity[1] for identity in calls_seen if identity[0] == state['session_id']}
+                for line in journal.read_text().splitlines():
+                    params = json.loads(line).get('params', {})
+                    event = params.get('event', {}); data = event.get('data', {})
+                    if (params.get('sessionId') == state['session_id']
+                            and data.get('turn') in turns
+                            and event.get('type') == 'assistant/message'):
+                        text = ''.join(block.get('text', '') for block in data.get('message', {}).get('content', [])
+                                       if block.get('type') == 'text')
+                        identity = (data.get('turn'), data.get('message', {}).get('id', data.get('step')), text)
+                        if text and identity not in seen:
+                            seen.add(identity)
+                            messages.append(text)
+                files['research-transcript.md'] = '\n\n'.join(messages).encode('utf-8')
+                notes = work / 'research-notes.md'
+                if notes.is_file() and not notes.is_symlink():
+                    files['research-notes.md'] = notes.read_bytes()
             for name in outputs:
+                if name in files:
+                    continue
                 path = work / name
                 if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(work):
                     raise RuntimeError(f"DSH job did not produce a contained regular file: {name}")
@@ -620,8 +642,8 @@ class DshBatchRunner:
             if exchange is not None and {name: hashlib.sha256(data).hexdigest()
                     for name, data in files.items()} != state["turns"][-1]["outputs"]:
                 raise RuntimeError("DSH final output changed after its completed turn")
-            for name in outputs:
-                state["outputs"][name] = hashlib.sha256(files[name]).hexdigest()
+            for name, body in files.items():
+                state["outputs"][name] = hashlib.sha256(body).hexdigest()
             archive = job / "outputs"
             archive.mkdir()
             write_files(archive, files)
@@ -873,6 +895,12 @@ class DshStructuredProducerClient:
         return {"assignment.json": task_json_bytes(assignment),
                 "system-contract.txt": (system or "").encode("utf-8")}
 
+    def output_name(self, assignment):
+        return "response.json"
+
+    def decode_response(self, assignment, files):
+        return json_object(files[self.output_name(assignment)].decode("utf-8"), "DSH " + self.deliverable_label + " response")
+
     def complete(self, *, system, prompt):
         try:
             assignment = json.loads(prompt)
@@ -890,15 +918,15 @@ class DshStructuredProducerClient:
         projected["runtime_python"] = self.runtime_python
         exchange = self.exchange_for(projected, system)
         options = {"exchange": exchange} if exchange is not None else {}
+        output_name = self.output_name(projected)
         result = self.runner.run(
             self.task(projected),
             inputs=self.input_files(projected, system),
-            outputs=["response.json"],
+            outputs=[output_name],
             deadline=min(time.monotonic() + self.timeout_seconds,
                          getattr(self, "deadline", None) or float("inf")), **options)
         try:
-            response = json_object(result["files"]["response.json"].decode("utf-8"),
-                                   "DSH " + self.deliverable_label + " response")
+            response = self.decode_response(projected, result["files"])
         except (ValidationError, ValueError, UnicodeError) as exc:
             raise DshBatchError(f"invalid {self.deliverable_label} deliverable: {exc}",
                                 receipt=result["receipt"], usage=result["usage"]) from exc

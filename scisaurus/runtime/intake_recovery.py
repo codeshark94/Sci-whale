@@ -240,8 +240,9 @@ def stopped_step(root, *, receipt_sha256, attempt_path, receipt_status):
             response_path=receipt_path.parent/'outputs/response.json'
             response=None
             if receipt_status=='completed':
-                response=json.loads(response_path.read_bytes())
-                if record.get('response')!=response or receipt['outputs']['response.json']!=sha(response_path.read_bytes()):
+                from scisaurus.runtime.primary_work import checkpoint_response
+                response_path,response=checkpoint_response(receipt_path,receipt)
+                if record.get('response')!=response:
                     raise StateError('completed predecessor lost its exact response')
             yield {'root':root,'project':project,'checkpoint_raw':checkpoint_raw,'session':session,
                 'state_raw':state_raw,'state':state,'control_raw':control_raw,'marker':marker,

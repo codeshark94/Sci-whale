@@ -17,6 +17,24 @@ def work_instructions():
     return ' '.join(native_interface()['work_instructions'])
 
 
+def checkpoint_response(receipt_path, receipt):
+    """Read archived notes or historical structured output without changing its bytes."""
+    name = next((name for name in ('research-transcript.md', 'research-notes.md', 'response.json')
+                 if name in receipt.get('outputs', {})), 'response.json')
+    path = Path(receipt_path).parent / 'outputs' / name
+    raw = path.read_bytes()
+    if sha(raw) != receipt['outputs'][name]:
+        raise StateError('last completed work changed')
+    response = {'notes': raw.decode('utf-8')} if name != 'response.json' else json.loads(raw)
+    if name == 'research-transcript.md' and 'research-notes.md' in receipt['outputs']:
+        notes_path = Path(receipt_path).parent / 'outputs/research-notes.md'
+        notes = notes_path.read_bytes()
+        if sha(notes) != receipt['outputs']['research-notes.md']:
+            raise StateError('last completed notes changed')
+        response['workspace_notes'] = notes.decode('utf-8')
+    return path, response
+
+
 def work_request(context):
     observations=[context['record'].get('observation') or {},*context['record'].get('observations',[])]
     if (any(x.get('outcome')=='result_unknown' for x in observations)
@@ -26,11 +44,8 @@ def work_request(context):
     if response is None:
         for call in reversed(context['state']['calls']):
             path=Path(call['receipt']);receipt=json.loads(path.read_bytes())
-            if receipt['status']=='completed' and receipt.get('outputs',{}).get('response.json'):
-                source_path=path.parent/'outputs/response.json';raw=source_path.read_bytes()
-                if sha(raw)!=receipt['outputs']['response.json']:
-                    raise StateError('last completed work changed')
-                response=json.loads(raw);break
+            if receipt['status']=='completed' and ({'response.json','research-notes.md','research-transcript.md'} & receipt.get('outputs',{}).keys()):
+                source_path,response=checkpoint_response(path,receipt);break
     calls={};failures=[]
     for line in (context['receipt_path'].parent/'events.jsonl').read_text().splitlines():
         row=json.loads(line);params=row.get('params',{});event=params.get('event',{});data=event.get('data',{})
@@ -63,13 +78,6 @@ def work_assignment(original,request):
     return {**{key:deepcopy(value) for key,value in original.items() if key not in retired},
         'research_work':deepcopy(request),'scientific_software_tools':tools,
         'native_tool_interface':deepcopy(native_interface())}
-
-
-def validate_work_response(assignment,response):
-    if not isinstance(response,dict) or not response:
-        raise ValidationError('research publication requires a nonempty JSON object')
-    if 'tool_action' in response:
-        raise ValidationError('Call the native research_tool; response.json contains research notes only')
 
 
 def validate_native_action(assignment,action):

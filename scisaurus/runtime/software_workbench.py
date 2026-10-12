@@ -65,7 +65,7 @@ def run_arguments_schema():
             "properties":{name:{"type":"string"} for name in (*required,*optional)}}
     return {"type":"object","additionalProperties":False,
         "required":["source","input","purpose","expected"],"properties":{
-            "source":{"type":"string","description":"Complete Python/R source. Read JSON input from stdin if needed. Print exactly one JSON object to stdout; send explanatory text to stderr."},
+            "source":{"type":"string","description":"Complete Python/R source. Read JSON input from stdin if needed. Raw stdout, stderr and declared output files are recorded. Emit a JSON object only when comparing against a declared expected value."},
             "input":{"type":"object","additionalProperties":True,"description":"Explicit JSON input; supply {} for a self-contained program."},
             "purpose":{"type":"string","enum":["upstream_example","scientific_computation"]},
             "expected":{"oneOf":[{"type":"null"},expected],
@@ -149,7 +149,7 @@ def tool_contract():
             "build is supplied only for native software; executable is relative to the acquired environment. Native runs use a Python adapter and may invoke the pinned engine_path in the read-only environment; all child processes share the same sandbox.",
             "When the controller binds a laboratory, list_runtimes reports the operator-provisioned runtimes and their attestation drift. A run may select one by declared label. The label, not a host path, is the only handle a specialist has; the controller resolves and re-verifies executable and package-lock identity before and after execution. A runtime is never ready merely because it exists or imports.",
             "run.inputs names earlier receipt-bound artifacts by content-addressed reference and a safe relative name. The controller re-verifies every hash, rejects traversal, absolute paths, symlinks, directories, changed or missing files, and stages exact copies into the run workspace. run.outputs declares the files a later run may consume; only those regular files inside the workspace are retained, hashed and returned as artifact references. Preserve the declared coupling plan across sequential receipt-bound runs instead of assuming an automatic coupling engine.",
-            "Run programs consume one JSON object on stdin and emit one JSON object on stdout. R programs may use base R for JSON literals or a pinned JSON dependency.",
+            "Run programs receive one JSON object on stdin. Raw stdout, stderr and declared output files are recorded. JSON stdout is required only for a declared expected-value comparison.",
             "For upstream_example, expected must be {value: <documented upstream JSON object>, absolute_tolerance: <nonnegative number>, relative_tolerance: <nonnegative number>}; it cannot be null. For scientific_computation, expected may be null. Tolerances must follow documented precision; a match checks reproduction, not scientific fitness.",
             "A successful installation is not scientific admission. Distinguish upstream examples, new computations and stored upstream results.",
             "Before admitting custom_model, record its mathematical model_definition and review source mappings, units and reference scales, coefficient status, applicability and question alignment. This is an implementation decision, not a requirement for final experimental results. Distinguish declared pilots from empirical calibrations.",
@@ -1387,9 +1387,11 @@ class SoftwareWorkbench:
             output = _parse_object(execution["stdout"].encode())
             expected_matches = _matches_expected(output, args["expected"]) if args["expected"] is not None else None
         except (ValueError, ValidationError) as exc:
-            raise SoftwareExecutionError({**execution, "output_error": str(exc),
-                                          "failure_artifacts": self._failure_snapshot(root, limits),
-                                          "inputs": staged, "runtime": runtime_label}) from exc
+            if args["expected"] is not None:
+                raise SoftwareExecutionError({**execution, "output_error": str(exc),
+                                              "failure_artifacts": self._failure_snapshot(root, limits),
+                                              "inputs": staged, "runtime": runtime_label}) from exc
+            output, expected_matches = None, None
         try:
             outputs = self._collect_outputs(declared_outputs, root, limits)
         except ValidationError as exc:
@@ -1405,7 +1407,8 @@ class SoftwareWorkbench:
                 "input": args["input"], "input_sha256": _sha(canonical_bytes(args["input"])),
                 "purpose": args["purpose"], "documentation_refs": documentation_refs,
                 "inputs": staged, "outputs": outputs, "execution": execution,
-                "output": output, "stdout_sha256": _sha(execution["stdout"].encode()),
+                "output": output, "output_format": "json_object" if output is not None else "text",
+                "stdout_sha256": _sha(execution["stdout"].encode()),
                 "expected": args["expected"], "expected_matches": expected_matches,
                 "scientific_admission": "not_assessed"}
         if args["purpose"] == "upstream_example" and expected_matches is not True:

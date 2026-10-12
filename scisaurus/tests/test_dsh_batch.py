@@ -103,6 +103,21 @@ class BatchTests(unittest.TestCase):
         self.assertTrue(receipt["process_reaped"])
         self.assertEqual(receipt["status"], "completed")
 
+    def test_primary_transcript_is_recorded_without_model_authored_files_or_format(self):
+        text=FAKE.replace("'message':{'id':'m1','source':{'kind':'model'}}",
+            "'message':{'id':'m1','source':{'kind':'model'},'content':[{'type':'text','text':'# Work notes\\nUnfinished sketch { no JSON contract.'}]}" )
+        self.script.write_text(text);self.composition.write_text(json.dumps({'mode':'missing'}))
+        runner=DshBatchRunner(self.config(),root=self.root/'notes-jobs')
+        runner.task_contract={'mode':'research_work','input_delivery':'inline'}
+        result=runner.run('Continue work',inputs={'assignment.json':b'{}'},outputs=['research-transcript.md'])
+        self.assertEqual(result['files']['research-transcript.md'],b'# Work notes\nUnfinished sketch { no JSON contract.')
+        receipt_path=Path(result['receipt']);receipt=json.loads(receipt_path.read_bytes())
+        self.assertEqual(receipt['status'],'completed');self.assertEqual(result['usage']['model_calls'],1)
+        self.assertEqual(receipt['outputs']['research-transcript.md'],sha256(receipt_path.parent/'outputs/research-transcript.md'))
+        self.assertFalse((receipt_path.parent/'work/research-notes.md').exists())
+        manifest=json.loads(Path(receipt['task_contract']['path']).read_bytes())
+        self.assertEqual(Path(manifest['output']).name,'research-notes.md')
+
     def exchange_backend(self, *, omit_second_output=False):
         script = FAKE.replace("for line in sys.stdin:", "turn=0\nfor line in sys.stdin:")
         script = script.replace("session=request['params']['sessionId']", "turn+=1\n  session=request['params']['sessionId']")

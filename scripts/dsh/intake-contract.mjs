@@ -55,7 +55,7 @@ export function createPolicy(manifest, check) {
       .map(([path, input]) => ({ path, missing: input.lines.map((_, i) => i + 1).filter(i => !coverage.get(path).has(i)) }));
   }
   function guard(exec) {
-    const missing = pending(exec.agent);
+    const missing = manifest.mode === 'research_work' ? [] : pending(exec.agent);
     if (missing.length) {
       let path;
       try { path = realpathSync(resolve(manifest.workspace, exec.arguments.file_path ?? '')); } catch { /* No owned target. */ }
@@ -71,8 +71,7 @@ export function createPolicy(manifest, check) {
     if (['research_tool','research_run'].includes(exec.name) || exec.name === (manifest.mode==='research_work' ? 'review_response' : 'validate_response')) return;
     if (manifest.mode === 'research_work' && ['write', 'edit'].includes(exec.name)) {
       if (!ownedFile(exec.arguments.file_path)) return 'Research files must remain in the owning workspace';
-      if (resolve(manifest.workspace, exec.arguments.file_path ?? '') !== output) return;
-      if (exec.name === 'edit') return 'Publish response.json as a complete document with write';
+      return;
     }
     if (exec.name !== 'write' || resolve(manifest.workspace, exec.arguments.file_path ?? '') !== output)
       return 'Intake publication requires a whole response.json write';
@@ -153,10 +152,10 @@ export function apply(ctx, config) {
         arguments: { type: 'object', additionalProperties: true } } }, args => args, interfaceSpec.controller_description);
     registerController('research_run', assignment.scientific_software_tools.native_arguments_schema.run,
       args => ({ operation: 'run', arguments: args }),
-      'Execute complete source in exactly one declared runtime or acquired environment. Mandatory source/input/purpose/expected fields and JSON stdout format are specified in this tool schema. Supply input={} and expected=null when appropriate. Returns the full actual receipt; execution is not scientific validation.');
+      'Execute complete source in exactly one declared runtime or acquired environment. Mandatory source/input/purpose/expected fields are specified in this tool schema. Supply input={} and expected=null when appropriate. Raw stdout, stderr and files are returned; JSON output is required only for a declared expected-value comparison. Execution is not scientific validation.');
   }
   ctx.tools.register({ name: 'inspect_workspace',
-    description: 'List the current writable workspace and check whether response.json exists. An absent response is normal before publication; this does not read file contents.',
+    description: 'List the current writable workspace and check whether the checkpoint notes file exists. An absent file is normal before writing; this does not read file contents.',
     parameters: {},
     output: { schema: { type: 'object', additionalProperties: false, required: ['workspace', 'entries', 'response_exists'],
       properties: { workspace: { type: 'string' }, entries: { type: 'array', items: { type: 'string' } }, response_exists: { type: 'boolean' } } },
@@ -165,13 +164,21 @@ export function apply(ctx, config) {
   });
   ctx.tools.register({ name: manifest.mode==='research_work' ? 'review_response' : 'validate_response',
     description: manifest.mode==='research_work'
-      ? 'Check the publication and tool interface only. Research content is unadmitted; independent scientific review is separate.'
+      ? 'Report automatic checkpoint recording and optional notes-file identity. No file or output format is required. Scientific review is separate.'
       : 'Validate response.json against the exact sealed assignment using the authoritative controller checker. No scientific validation or admission.',
     parameters: {},
-    output: { schema: { type: 'object', additionalProperties: false, required: ['validated','sha256'],
+    output: { schema: manifest.mode==='research_work' ? {
+      type:'object',additionalProperties:false,required:['recording','notes_file_present','sha256','scientific_validation'],
+      properties:{recording:{type:'string'},notes_file_present:{type:'boolean'},sha256:{oneOf:[{type:'string'},{type:'null'}]},scientific_validation:{type:'string'}}
+      } : { type: 'object', additionalProperties: false, required: ['validated','sha256'],
       properties: { validated: { type: 'boolean' }, sha256: { type: 'string' } } },
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
-    execute: () => check(readFileSync(manifest.output, 'utf8')),
+    execute: () => {
+      if (manifest.mode !== 'research_work') return check(readFileSync(manifest.output, 'utf8'));
+      let raw;
+      try { raw=readFileSync(manifest.output); } catch (error) { if(error.code!=='ENOENT')throw error; }
+      return {recording:'automatic',notes_file_present:raw!==undefined,sha256:raw===undefined?null:hash(raw),scientific_validation:'not_evaluated'};
+    },
   });
   process.stderr.write(marker + '\n');
 }

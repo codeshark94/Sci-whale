@@ -19,7 +19,8 @@ def main():
         validate_native_action(assignment,value['action'])
         print(json.dumps({'validated':True,'sha256':hashlib.sha256(canonical_bytes(value['action'])).hexdigest()}))
         return
-    validate_response(assignment, strict_document(value['document']))
+    if not assignment.get('research_work'):
+        validate_response(assignment, strict_document(value['document']))
     print(json.dumps({'validated': True,
         'sha256': hashlib.sha256(value['document'].encode('utf-8')).hexdigest()}))
 
