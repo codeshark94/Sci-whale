@@ -1434,14 +1434,16 @@ class ComposerRunner:
                      for key, value in self.context.items()
                      if isinstance(value, dict) and isinstance(value.get("topic"), dict)
                      and all(value["topic"].get(field) for field in ("id", "research_question"))}
-        if not questions:
-            raise StateError("mission migration requires its retained admitted question")
         current = self._research_process_policy()
         if current and current["mode"] == mode:
             return current
         state = self._read_json_object(self.root / "development-session/session.json") or {}
         if not state.get("session_id"):
             raise StateError("mission migration requires the existing development session")
+        return self._register_research_process(mode, checkpoint, questions, state)
+
+    def _register_research_process(self, mode, checkpoint, questions, state):
+        from scisaurus.runtime.run_control import save_control
         control = self._read_json_object(self.root / "output/run-control.json") or {}
         record = self._publish("command/operator/research-process", "decision_note", {
             "schema_version": "operator-research-process-1", "workflow_id": self.workflow["id"],
@@ -1453,8 +1455,25 @@ class ComposerRunner:
         }, "command.operator", subjects=[checkpoint["artifact_ref"]])
         control.pop("research_resume_authorization_ref", None)
         save_control(self.root / "output", {**control, "research_process_policy_ref": record["artifact_ref"]})
-        self._checkpoint_stopped_control("operator:research_process")
+        self._checkpoint("research:owner", force=True)
         return self._research_process_policy()
+
+    def _prepare_primary_owner(self):
+        """Bind native research by default without invoking a stage author."""
+        from scisaurus.runtime.development_session import DevelopmentSession
+        configured=self._software_author_backend_config()
+        if configured is None:
+            raise ProviderConfigurationError("research requires its configured persistent primary backend")
+        session=DevelopmentSession(development_session_binding(self.root))
+        if not session.path.exists():
+            with session.lease(configured['author_backend'],time.monotonic()+30):pass
+        state=json.loads(session.path.read_bytes())
+        self._checkpoint("research:prepare-owner",force=True)
+        checkpoint=self.store.head(f"command/composer/checkpoints/{len(self.feedback)+len(self.stage_records)+1}")
+        questions={key:{field:value['topic'][field] for field in ('id','research_question')}
+            for key,value in self.context.items() if isinstance(value,dict) and isinstance(value.get('topic'),dict)
+            and all(value['topic'].get(field) for field in ('id','research_question'))}
+        return self._register_research_process('session_led',checkpoint,questions,state)
 
     def _research_process_policy(self):
         control = self._read_json_object(self.root / "output/run-control.json") or {}
@@ -1544,7 +1563,7 @@ class ComposerRunner:
     def _require_stage_graph_execution(self):
         """Keep legacy producer entry points outside a persistent mission owner."""
         policy = self._research_process_policy()
-        if policy is not None and policy["mode"] == "session_led":
+        if policy is None or policy["mode"] != "stage_graph":
             raise StateError("mission research is owned by its original session; stage-graph execution is disabled")
 
     def _require_settled_research_operations(self):
@@ -1612,8 +1631,10 @@ class ComposerRunner:
         backend = self._software_author_backend_config()
         if backend is None:
             raise StateError("primary reconciliation requires its original backend")
+        from scisaurus.runtime.primary_client import current_primary_backend
+        effective=current_primary_backend(development_session_binding(self.root),backend['author_backend'])
         record = DevelopmentSession(development_session_binding(self.root)).reconcile_accounted_unknown(
-            backend["author_backend"],self.store,checkpoint_ref=checkpoint["artifact_ref"],
+            effective,self.store,checkpoint_ref=checkpoint["artifact_ref"],
             policy_ref=policy["artifact_ref"],receipt_sha256=receipt_sha256)
         self._checkpoint_stopped_control("operator:research_primary_reconciled")
         return {"artifact_ref":record["artifact_ref"],"body_sha256":record["body_hash"]}
@@ -1622,8 +1643,15 @@ class ComposerRunner:
         policy = self._research_process_policy()
         control = self._read_json_object(self.root / "output/run-control.json") or {}
         ref = control.get("research_resume_authorization_ref")
-        if policy is None or policy["mode"] != "session_led" or not ref:
-            raise StateError("mission researcher is held pending externally confirmed quota recovery")
+        if policy is None or policy["mode"] != "session_led":
+            raise StateError("research requires its persistent primary owner")
+        if not ref:
+            from scisaurus.runtime.requested_review import receipt_has_provider_hold
+            state=self._read_json_object(self.root/"development-session/session.json") or {}
+            calls=state.get('calls',[])
+            if not calls or receipt_has_provider_hold(calls[-1]['receipt']):
+                raise StateError("mission researcher is held pending externally confirmed quota recovery")
+            return None
         manifest, _, body = self._read_verified_artifact_json(ref)
         if (manifest.get("author") != "command.operator"
                 or body.get("schema_version") != "operator-research-resume-1"
@@ -31602,9 +31630,14 @@ class ComposerRunner:
 
     def _run_authorized(self):
         policy = self._research_process_policy()
-        if policy and policy["mode"] == "session_led":
+        if policy is None:policy=self._prepare_primary_owner()
+        if policy["mode"] == "session_led":
             from scisaurus.runtime.mission_research import MissionResearchSession
             return MissionResearchSession(self).run()
+        return self._run_stage_graph()
+
+    def _run_stage_graph(self):
+        self._require_stage_graph_execution()
         try:
             self._retire_restored_workflow_stops()
             self._reconcile_concept_intake()

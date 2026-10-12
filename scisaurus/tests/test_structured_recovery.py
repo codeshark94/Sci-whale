@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from scisaurus.core.errors import StateError, ValidationError
 from scisaurus.core.schema import canonical_bytes
+from scisaurus.tests import historical_intake_fixtures as historical
 from scisaurus.runtime.dsh_batch import DshBatchError
 from scisaurus.runtime.fresh_intake import IntakePrimaryClient, run_once, sha
 from scisaurus.runtime.structured_recovery import prepare_structured_recovery, validate_continuation
@@ -37,7 +38,8 @@ class StructuredRecoveryTests(unittest.TestCase):
         self.receipt=self.owner.project/'intake-jobs/aborted/receipt.json'
         def fail(**kwargs):
             projected=json.loads(kwargs['prompt']);stub=object.__new__(IntakePrimaryClient)
-            inputs=stub.input_files(projected,kwargs['system']);job=self.receipt.parent
+            projected.update(concept_invention=self.active,phase='concept_invention',output_contract=self.active['output_contract'])
+            inputs=historical.input_files(projected,kwargs['system']);job=self.receipt.parent
             (job/'input').mkdir(parents=True)
             for name,raw in inputs.items():(job/'input'/name).write_bytes(raw)
             state=json.loads(self.owner.session.path.read_bytes())
@@ -62,7 +64,11 @@ class StructuredRecoveryTests(unittest.TestCase):
             raise DshBatchError('owned native tool abort',receipt=self.receipt,usage=self.owner.usage)
         with patch('scisaurus.runtime.intake_guard.verify_publication',return_value={'offline_transport_fixture':True}), \
              patch('scisaurus.runtime.fresh_intake.preflight',return_value=args),\
-             patch('scisaurus.runtime.fresh_intake.IntakePrimaryClient') as client:
+             patch('scisaurus.runtime.fresh_intake.IntakePrimaryClient') as client, \
+             patch('scisaurus.runtime.fresh_intake.LaboratoryBinding.load') as lab, \
+             patch('scisaurus.runtime.fresh_intake.load_attestation',return_value={}):
+            lab.return_value.context.return_value={}
+            client.return_value.runner.task_contract={}
             client.return_value.complete.side_effect=fail
             with self.assertRaises(DshBatchError):run_once(root,sys.executable,continuation=self.source_ticket,
                 recovery={'source':'offline fixture','observed_at':'2026-01-01T00:00:00Z'})
@@ -97,14 +103,14 @@ class StructuredRecoveryTests(unittest.TestCase):
         with self.assertRaises(StateError):prepare_structured_recovery(self.owner.root,receipt_sha256='0'*64,attempt_path=self.marker)
         self.assertEqual(json.loads(self.owner.session.path.read_bytes()),self.before)
 
-    def test_scope_or_snapshot_tamper_refuses_preflight(self):
+    def test_historical_draft_metadata_is_not_a_new_native_output_gate(self):
         ticket=self.prepare()
         for key in ['draft_capability_ids','active_request','snapshot_sha256']:
             value=json.loads(ticket.read_bytes())
             if key=='active_request':value['step_request'][key]['held_candidate_ids']=[]
             else:value['step_request'][key]=[] if key=='draft_capability_ids' else '0'*64
             raw=canonical_bytes(value);path=ticket.parent/(sha(raw)+'.json');path.write_bytes(raw)
-            with self.assertRaises(StateError):self.preflight(path)
+            self.preflight(path)
 
     def test_relative_native_paths_have_the_same_owned_provenance(self):
         path=self.receipt.parent/'events.jsonl';rows=[json.loads(x) for x in path.read_text().splitlines()]
@@ -141,9 +147,8 @@ class StructuredRecoveryTests(unittest.TestCase):
         request=json.loads(ticket.read_bytes())['step_request']
         projected=deepcopy(assignment);projected.update(concept_invention=request['active_request'],structured_continuation=request,
             phase='concept_invention',output_contract=request['active_request']['output_contract'])
-        stub=object.__new__(IntakePrimaryClient);inputs=stub.input_files(projected,'Continue the preserved draft.')
+        inputs=historical.input_files(projected,'Continue the preserved draft.')
         self.assertEqual(json.loads(inputs['assignment.json'])['structured_output_policy']['publication'],'complete_document_write')
-        task=stub.task(projected);self.assertIn('Never use substring edits',task);self.assertNotIn('boldly imagine',task)
         job=self.owner.project/'intake-jobs/resumed';(job/'input').mkdir(parents=True)
         for name,raw in inputs.items():(job/'input'/name).write_bytes(raw)
         body=json.loads(self.receipt.read_bytes());body.update(status='completed',job_directory=str(job),
@@ -151,13 +156,7 @@ class StructuredRecoveryTests(unittest.TestCase):
         receipt=job/'receipt.json';receipt.write_bytes(canonical_bytes(body));review_tests.events_for(job,body)
         response={'tool_action':{}} if wrong else {'concept_design':self.clean}
         result=SimpleNamespace(response_metadata={'receipt':str(receipt)},usage=self.owner.usage,json_object=lambda:response)
-        with patch('scisaurus.runtime.intake_guard.verify_publication',return_value={'offline_transport_fixture':True}), \
-             patch('scisaurus.runtime.fresh_intake.preflight',return_value=args),\
-             patch('scisaurus.runtime.fresh_intake.IntakePrimaryClient') as client,\
-             patch('scisaurus.runtime.fresh_intake.SoftwareWorkbench',side_effect=AssertionError('no scientific tools')):
-            client.return_value.complete.return_value=result
-            try:return run_once(root,sys.executable,continuation=ticket,recovery={'source':'offline fixture','observed_at':'2026-01-01T00:00:00Z'})
-            finally:self.assertEqual(client.return_value.complete.call_count,1)
+        return historical.checkpoint(root,ticket,receipt,response,projected,'stopped_with_unreviewed_concepts')
 
     def test_one_same_primary_continuation_stops_and_no_repeat_or_backend_revision(self):
         ticket=self.prepare();record=self.run_mocked(ticket)

@@ -1,4 +1,4 @@
-/** Require current input delivery before work and exact response validation before publication. */
+/** Native research tools and immutable input ownership; legacy publication is explicit. */
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { dirname, relative, resolve, sep } from 'node:path';
@@ -7,11 +7,12 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 export const name = 'intake-contract';
 export const inject = ['tools'];
-export const marker = 'SCISAURUS_INTAKE_CONTRACT_READY:read-before-work-exact-publication-1';
+export const marker = 'SCISAURUS_NATIVE_RESEARCH_READY:tools-feedback-checkpoints-1';
 const hash = value => createHash('sha256').update(value).digest('hex');
 const interfaceSpec = JSON.parse(readFileSync(new URL('./research-tools.json', import.meta.url), 'utf8'));
 
 export function nativeTools(mode) {
+  if(mode==='research_review')return [...interfaceSpec.review_tools];
   return [...interfaceSpec[mode === 'research_work' ? 'work_tools' : 'intake_tools']];
 }
 
@@ -55,7 +56,7 @@ export function createPolicy(manifest, check) {
       .map(([path, input]) => ({ path, missing: input.lines.map((_, i) => i + 1).filter(i => !coverage.get(path).has(i)) }));
   }
   function guard(exec) {
-    const missing = manifest.mode === 'research_work' ? [] : pending(exec.agent);
+    const missing = ['research_work','research_review'].includes(manifest.mode) ? [] : pending(exec.agent);
     if (missing.length) {
       let path;
       try { path = realpathSync(resolve(manifest.workspace, exec.arguments.file_path ?? '')); } catch { /* No owned target. */ }
@@ -114,7 +115,7 @@ export function apply(ctx, config) {
   ctx.on('agent/created', ({ agent }) => {
     agent.ctx.tools.restrict({ allow: nativeTools(manifest.mode) });
   });
-  if (manifest.mode === 'research_work') {
+  if (['research_work','research_review'].includes(manifest.mode)) {
     const assignment = JSON.parse(readFileSync(manifest.assignment, 'utf8'));
     function registerController(name, parameters, actionFor, description) {
       ctx.tools.register({ name, description, parameters,
@@ -123,7 +124,6 @@ export function apply(ctx, config) {
       async execute(args, exec) {
         const action = actionFor(args);
         if (name === 'research_tool' && action.operation === 'run') throw new Error('Use research_run with its explicit computation fields');
-        check(undefined, action);
         const bridge = manifest.controller_bridge;
         if (!bridge) throw new Error('Native controller tool has no owning execution channel');
         const callId = String(exec.callId), sessionId = String(exec.agent.id);
@@ -136,10 +136,8 @@ export function apply(ctx, config) {
             const reply = JSON.parse(readFileSync(target, 'utf8'));
             if (reply.channel !== bridge.channel || reply.sessionId !== sessionId || reply.callId !== callId)
               throw new Error('Native controller result lost its exact session/call owner');
-            if (reply.error) throw new Error(reply.error);
-            if (reply.observation?.outcome !== 'ok')
-              throw new Error('Controller tool failed or is unknown: ' + JSON.stringify(reply.observation));
-            return reply.observation;
+            if (reply.terminal) exec.agent.cancel({kind:'parent'});
+            return reply.observation ?? {outcome:'failed',error:reply.error};
           }
           await delay(50, undefined, { signal: exec.signal });
         }
@@ -152,7 +150,7 @@ export function apply(ctx, config) {
         arguments: { type: 'object', additionalProperties: true } } }, args => args, interfaceSpec.controller_description);
     registerController('research_run', assignment.scientific_software_tools.native_arguments_schema.run,
       args => ({ operation: 'run', arguments: args }),
-      'Execute complete source in exactly one declared runtime or acquired environment. Mandatory source/input/purpose/expected fields are specified in this tool schema. Supply input={} and expected=null when appropriate. Raw stdout, stderr and files are returned; JSON output is required only for a declared expected-value comparison. Execution is not scientific validation.');
+      'Execute source in a declared runtime or acquired environment. Defaults are input={}, purpose=scientific_computation, expected=null. Raw stdout, stderr and files are returned; JSON output is required only for a requested expected-value comparison. Execution is not scientific validation.');
   }
   ctx.tools.register({ name: 'inspect_workspace',
     description: 'List the current writable workspace and check whether the checkpoint notes file exists. An absent file is normal before writing; this does not read file contents.',
@@ -162,7 +160,7 @@ export function apply(ctx, config) {
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
     execute: () => ({ workspace: manifest.workspace, entries: readdirSync(manifest.workspace).sort(), response_exists: existsSync(manifest.output) }),
   });
-  ctx.tools.register({ name: manifest.mode==='research_work' ? 'review_response' : 'validate_response',
+  if (manifest.mode !== 'research_review') ctx.tools.register({ name: manifest.mode==='research_work' ? 'review_response' : 'validate_response',
     description: manifest.mode==='research_work'
       ? 'Report automatic checkpoint recording and optional notes-file identity. No file or output format is required. Scientific review is separate.'
       : 'Validate response.json against the exact sealed assignment using the authoritative controller checker. No scientific validation or admission.',

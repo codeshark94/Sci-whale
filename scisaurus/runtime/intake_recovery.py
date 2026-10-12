@@ -260,8 +260,6 @@ def completed_step(root, *, receipt_sha256, attempt_path):
 def seal_stopped_step(context, request):
     """Publish one control-only ticket; a consumed marker cannot grant another dispatch."""
     c=context; state=c['state']; identity=state['calls'][-1]['sha256']; status=c['receipt']['status']
-    if json.loads(c['control_raw']).get('controller')=='primary-work' and request['kind']!='research_work':
-        raise StateError('primary work cannot return to the retired stage-author path')
     body={'schema_version':'explicit-intake-continuation-1','session_id':state['session_id'],
         'development_session':c['session'].binding,'preparation_sha256':sha(c['checkpoint_raw']),
         'session_sha256':sha(c['state_raw']),'control_sha256':sha(c['control_raw']),

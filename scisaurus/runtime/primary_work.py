@@ -1,4 +1,4 @@
-"""Same-primary work packets, recorded tools and unadmitted review feedback."""
+"""Same-primary work packets, actual observations and requested review feedback."""
 from copy import deepcopy
 import json
 from pathlib import Path
@@ -35,17 +35,15 @@ def checkpoint_response(receipt_path, receipt):
     return path, response
 
 
-def work_request(context, feedback=None):
-    delivered=json.loads((context['receipt_path'].parent/'input/assignment.json').read_bytes())
-    inherited=delivered.get('research_work',{}).get('checkpoint',{})
-    observations=[*inherited.get('observations',[]),context['record'].get('observation') or {},
-                  *context['record'].get('observations',[])]
-    for call in context['state']['calls']:
+def primary_observations(state):
+    """Recover actual observations from the primary's own sealed native receipts."""
+    observations=[]
+    for call in state['calls']:
         path=Path(call['receipt']);raw=path.read_bytes()
         if sha(raw)!=call['sha256']:
             raise StateError('recorded primary receipt changed')
         receipt=json.loads(raw)
-        if receipt['session_id']!=context['state']['session_id']:
+        if receipt['session_id']!=state['session_id']:
             raise StateError('recorded tool evidence belongs to another primary')
         for native in receipt.get('native_tool_calls',[]):
             if native.get('status')!='responded':continue
@@ -55,6 +53,18 @@ def work_request(context, feedback=None):
             reply=json.loads(body)
             if 'observation' in reply:
                 observations.append(reply['observation'])
+    return observations
+
+
+def work_request(context, feedback=None):
+    from scisaurus.runtime.requested_review import review_is_accounted
+    if any(not review_is_accounted(x) for x in context['record'].get('review_dispatches',[])):
+        raise StateError('unknown review dispatch requires its own accounting reconciliation')
+    delivered=json.loads((context['receipt_path'].parent/'input/assignment.json').read_bytes())
+    inherited=delivered.get('research_work',{}).get('checkpoint',{})
+    observations=[*inherited.get('observations',[]),context['record'].get('observation') or {},
+                  *context['record'].get('observations',[])]
+    observations.extend(primary_observations(context['state']))
     observations=list({x.get('receipt_ref') or (index,):x for index,x in enumerate(observations) if x}.values())
     if (any(x.get('outcome')=='result_unknown' for x in observations)
             or any(x.get('status')=='requested' for x in context['receipt'].get('native_tool_calls',[]))):
@@ -78,6 +88,8 @@ def work_request(context, feedback=None):
         'receipt_sha256':sha(context['receipt_path'].read_bytes()),
         'prior_outcome':context['receipt']['status'],
         'reported_usage':deepcopy(context['receipt']['usage']),
+        'review_dispatches':deepcopy(context['record'].get('review_dispatches',[])),
+        'reported_review_usage':deepcopy(context['record'].get('review_usage',{})),
         'error':context['record'].get('error'),
         'failed_native_tools':failures,
         'response_sha256':sha(source_path.read_bytes()) if response is not None else None,
@@ -88,9 +100,11 @@ def work_request(context, feedback=None):
 
 
 def work_assignment(original,request):
-    tools=tool_contract();tools['actions'].pop('acquire');tools.pop('response')
+    tools=tool_contract();tools.pop('response')
+    tools['native_arguments_schema']['run']['required']=['source']
+    tools['actions']['request_review']={'task':'independent review request','evidence':'explicit current evidence'}
     tools['native_tools']={'run':'research_run','other_operations':'research_tool'}
-    tools['rules']=['Call research_run for computation and research_tool for other operations. Read actual observations before continuing; a successful tool is not scientific admission.']
+    tools['rules']=['Call research_run for computation and research_tool for other operations. Read actual observations before continuing; tool status describes execution, not the scientific conclusion.']
     retired={'phase','output_contract','scientific_software_tools','execution_step','transport_feedback',
         'structured_output_policy','structured_continuation','concept_invention','invention_review',
         'invention_process','literature_acquisition'}
@@ -107,20 +121,26 @@ def validate_native_action(assignment,action):
     if action['operation']=='run':
         from scisaurus.runtime.software_workbench import validate_run_arguments
         validate_run_arguments(action['arguments'])
-    else:validate_readonly_action(action)
+    elif action['operation'] not in {'acquire','request_review'}:validate_readonly_action(action)
 
 
 def review_feedback(response):
-    return {'publication_interface':'valid','scientific_validation':'not_evaluated'}
+    return {'scientific_validation':'not_evaluated'}
 
 
-def native_tool_handler(assignment,workbench,record):
+def native_tool_handler(assignment,workbench,record,*,review=None):
     """Execute the primary's native request without another author or prompt dispatch."""
     def execute(action):
+        action=deepcopy(action)
+        if action.get('operation')=='run':
+            action['arguments']={'input':{},'purpose':'scientific_computation','expected':None,**action['arguments']}
         validate_native_action(assignment,action)
-        observation=workbench.execute(action)
+        if action['operation']=='request_review':
+            if review is None:raise StateError('independent review is unavailable')
+            observation=review(action['arguments'])
+        else:observation=workbench.execute(action)
         record.setdefault('observations',[]).append(deepcopy(observation))
-        if observation.get('outcome')=='ok':workbench.retain_observation(observation)
+        if observation.get('outcome')=='ok' and action['operation']!='request_review':workbench.retain_observation(observation)
         return observation
     return execute
 

@@ -4,9 +4,9 @@ import json
 import time
 import uuid
 
-from scisaurus.core.errors import ValidationError
+from scisaurus.core.errors import ValidationError, StateError, NotFoundError, ProviderRateLimitError, ProviderConfigurationError
 from scisaurus.core.schema import canonical_bytes
-from scisaurus.runtime.run_control import ensure_run_allowed
+from scisaurus.runtime.run_control import ensure_run_allowed, RunPausedError
 
 METHOD = 'scisaurus/research-tool'
 TOOL = 'research_tool'
@@ -67,11 +67,16 @@ class NativeToolBridge:
                 raise ValidationError('native controller tool requires its recorded outcome')
             reply = {'channel': self.channel, 'sessionId': params['sessionId'],
                 'callId': params['callId'], 'observation': observation}
-            self.failed = observation['outcome'] != 'ok'
+            self.failed = observation['outcome'] == 'result_unknown'
+            if self.failed:reply['terminal']=True
         except Exception as error:
-            self.failed = True
+            self.failed = not isinstance(error,(ValidationError,StateError,NotFoundError,ValueError,TypeError,KeyError)) or isinstance(error,(ProviderRateLimitError,ProviderConfigurationError,RunPausedError)) or hasattr(error,'receipt')
             reply = {'channel': self.channel, 'sessionId': params['sessionId'],
                 'callId': params['callId'], 'error': f'{type(error).__name__}: {error}'}
+            if hasattr(error,'receipt'):
+                reply['dispatch']={'receipt':str(error.receipt),'usage':getattr(error,'usage',{}),
+                    'failure':error.failure_details() if callable(getattr(error,'failure_details',None)) else None}
+            if self.failed:reply['terminal']=True
         raw = canonical_bytes(reply)
         record.update(status='responded', response_file=filename,
             response_sha256=hashlib.sha256(raw).hexdigest(),

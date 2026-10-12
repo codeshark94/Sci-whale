@@ -19,45 +19,15 @@ from scisaurus.runtime.mission_time import validate_mission_time_policy
 from scisaurus.runtime.software_workbench import tool_contract
 
 
-CONTRACT = """You are the sole primary researcher for a fresh mission. Select the research
-question yourself from the declared broad scope. No earlier question, hypothesis,
-result, verdict, literature catalogue or development history is inherited.
-Excluded topics are negative constraints only, never recommended starting points.
-Reject semantic reuse of an excluded mechanism or function even under a new title.
-
-Compare substantively different candidates using captured primary literature.
-For each, identify the closest existing work, the concrete mechanism or prediction
-that differs, the strongest explanation that would remove its novelty, and the
-coverage limits of your search. A different material name, geometry decoration,
-model, optimizer or software stack alone is not a scientific contribution.
-If novelty cannot be established, say unresolved; do not treat missing search hits
-as proof of novelty. Do not manufacture citations or force a positive selection.
-
-For usefulness, name a concrete application, its operating constraints, a measured
-quantity that matters to it and a matched conventional baseline. Distinguish a
-plausible application from demonstrated improvement or deployable performance.
-Review theoretical bounds and known limits before committing to a claim. State
-the estimand, units, null, fair controls, uncertainty, sensitivities, failure modes
-and a decisive stopping rule. Choose the smallest informative run using an actual
-installed established solver; installed software is an execution constraint,
-not itself the reason to prefer a topic. A valid null is acceptable.
-
-Use controller tools and receipt-bound feedback. The harness supplies tools,
-errors, accounting and checkpoints; it does not choose the topic or inject a
-design. Keep this same serialized development session throughout research.
-Independent admission, blind validation, deterministic replay and scientific
-review occur at the evidence boundaries; their sessions receive no producer
-handle or history. Finish one small real execution and its same-result independent
-validation before widening designs, literature or experiments. A final result
-requires a fresh independent scientific audit, not your own success declaration.
-
-This assignment prepares topic selection only. Its topic_selection deliverable
-is a model-owned proposal, not an admitted question or a completed experiment.
-Export one declared tool_action, or the complete topic_selection object required
-by output_contract. Abstain when the evidence does not support a useful distinct
-question. All actual provider and solver dispatch requires externally confirmed
-account capacity and an explicitly authorized execution controller. There is no
-provider probe, timer-based unlock, automatic fallback author or legacy committee.
+CONTRACT = """You are the primary researcher. Choose and develop a research question within the
+user's objective, scope and exclusions. You own hypotheses, design, tool selection,
+implementation, corrections, interpretation and conclusions. Use the supplied
+open-source capabilities, literature and actual observations. Known tool errors
+are feedback for your next action. Record limitations and distinguish your own
+calculations from independent evidence. Replies and tool events are recorded
+automatically; no prescribed research-output schema or response file is required.
+Preserve history and reported usage. Account capacity, explicit user stops,
+finite dispatch watchdogs and unresolved executions are operational constraints.
 """
 
 
@@ -92,26 +62,16 @@ def prepare(root, spec, backend, laboratory_path, attestation_path):
     # A local lease reserves identity and empty durable storage; it cannot dispatch.
     with DevelopmentSession(binding).lease(backend, time.monotonic() + 30) as session:
         session_id = session.state["session_id"]
-    tools = tool_contract()
+    from scisaurus.runtime.primary_work import work_assignment
+    tools = work_assignment({}, {'kind':'research_work','checkpoint':{}})['scientific_software_tools']
     assignment = {
         "schema_version": "fresh-research-intake-1", "mission_id": root.name,
-        "phase": "topic_selection", "objective": spec["objective"], "scope": spec["scope"],
+        "objective": spec["objective"], "scope": spec["scope"],
         "excluded_topics": spec["excluded_topics"], "topic_reuse_allowed": False,
         "selected_topic": None, "frozen_scientific_input": None,
         "inherited_research_evidence": [], "inherited_session_history": [],
         "time_policy": spec["time_policy"],
         "scientific_software_tools": tools,
-        "output_contract": {"topic_selection": {
-            "decision": "propose|abstain", "selected_candidate_id": "candidate id or null on abstention",
-            "candidates": [{"id": "model-owned identity", "question": "falsifiable research question",
-                "mechanism": "physical mechanism", "closest_work": "captured source receipt references and comparison",
-                "novelty": "difference, strongest counterargument and unresolved search coverage",
-                "utility": "application, operating constraints, primary estimand and matched baseline",
-                "theoretical_limits": "bounds, limiting cases and competing explanations",
-                "pilot": "installed solver, frozen-input plan, controls, units, uncertainty and stopping rule",
-                "exclusion_comparison": "mechanism/function comparison against every relevant excluded topic"}],
-            "selection_rationale": "evidence-linked choice or abstention",
-            "limitations": ["unresolved evidence and execution limits"]}},
         "laboratory": {"config_identity": laboratory_identity(lab),
             "attestation_identity": attestation["attestation_sha256"],
             "runtime_labels": [row["label"] for row in lab["runtimes"]],
@@ -140,10 +100,8 @@ def prepare(root, spec, backend, laboratory_path, attestation_path):
         "input_sha256": {name: sha(body) for name, body in files.items()},
         "session_initial_sha256": sha(Path(binding["root"], "session.json").read_bytes()),
         "laboratory_config_path": str(laboratory_path), "laboratory_attestation_path": str(attestation_path),
-        "next_action": "externally confirm account capacity, bind an intake tool-exchange controller to the reserved session, then request primary topic selection",
-        "completion_gates": ["closest-work and usefulness assessment", "model-owned frozen pilot input",
-            "small actual installed-solver execution", "same-result independent validation and replay",
-            "fresh independent scientific final audit"],
+        "next_action": "confirm account capacity and continue the native primary with the user objective and available tools",
+
     }
     body = canonical_bytes(checkpoint)
     directory = root / "checkpoints"

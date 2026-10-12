@@ -128,13 +128,10 @@ def prepare_guarded_continuation(root, *, receipt_sha256, attempt_path, runtime_
 
 def seal_guarded_ticket(c, request, runtime_python):
     from scisaurus.runtime.intake_guard import guard_backend, sealed_file
-    if json.loads(c['control_raw']).get('controller')=='primary-work' and request['kind']!='research_work':
-        raise StateError('primary work cannot return to the retired stage-author path')
     directory=c['project']/'intake-controller/recoveries'/c['state']['calls'][-1]['sha256']
     directory.mkdir(parents=True,exist_ok=True)
     previous_raw=c['state_raw'];previous=c['state'];old=c['backend']
-    active=(guard_backend(old,directory/'contracts',runtime_python,work_mode=True)
-            if request['kind']=='research_work' else guard_backend(old,directory/'contracts',runtime_python))
+    active=guard_backend(old,directory/'contracts',runtime_python,work_mode=True)
     from scisaurus.runtime.run_control import control_lock
     with control_lock(c['project']/'output'):
         if ((c['project']/'output/run-control.json').read_bytes()!=c['control_raw']

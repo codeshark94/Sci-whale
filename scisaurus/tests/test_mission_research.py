@@ -45,7 +45,7 @@ class MissionResearchTests(unittest.TestCase):
     def runner(self, root):
         c = fixtures.ExperimentReviewHandoffTests().stopped(root)
         self.addCleanup(c.close)
-        c.laboratory_binding = object()
+        c.laboratory_binding = Mock();c.laboratory_binding.context.return_value={}
         directory = c.root/'development-session'; directory.mkdir()
         (directory/'session.json').write_text(json.dumps({'session_id':'retained-session','binding':development_session_binding(c.root),
             'calls':[], 'active_job':None}))
@@ -104,7 +104,7 @@ class MissionResearchTests(unittest.TestCase):
             dispatcher.dispatch.assert_not_called()
             self.assertEqual(retained,(c.context,c.usage,c.stage_records))
             with patch.object(c,'_research_process_policy',return_value=None):
-                c._require_stage_graph_execution()
+                with self.assertRaises(StateError):c._require_stage_graph_execution()
             with patch.object(c,'_research_process_policy',return_value={'mode':'stage_graph'}):
                 c._require_stage_graph_execution()
 
@@ -123,7 +123,7 @@ class MissionResearchTests(unittest.TestCase):
                     with self.assertRaisesRegex(StateError,'reconciliation'):
                         s.operation({'operation':'run','arguments':{'source':'different'}})
                     with self.assertRaisesRegex(StateError,'reconciliation'):
-                        s.propose_final({'result_ref':'different','summary':'different','limitations':[]})
+                        s.operation({'operation':'finish','arguments':{'summary':'different'}})
                     s._publish('command/research-session/'+namespace+'/prior',{'policy':s.policy,'status':'reconciled'})
                     c._require_settled_research_operations()
 
@@ -137,25 +137,6 @@ class MissionResearchTests(unittest.TestCase):
                 self.assertEqual(s.run()['status'],'paused')
                 primary.assert_not_called();legacy.assert_not_called()
 
-    def test_unknown_final_is_not_sent_back_as_primary_repair_feedback(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            c=self.runner(Path(tmp));self.authorize(c);s=MissionResearchSession(c)
-            def unsettled(final):
-                s._publish('command/research-session/final-reviews/interrupted',{'policy':s.policy,'status':'started'})
-                raise ModelWorkBlocked('independent dispatch interrupted')
-            test=self
-            class Primary:
-                def __init__(self,*args,**kwargs):self.options=kwargs
-                def complete(self,*,system,prompt):
-                    with test.assertRaisesRegex(StateError,'reconciliation'):
-                        self.options['final_exchange']({'final':{}},{},{'model_calls':1})
-                    raise StateError('stop without another primary turn')
-            with patch.object(c,'_software_author_backend_config',return_value={'author_backend':{'timeout_seconds':120},'runtime_python':'/offline'}), \
-                 patch.object(s,'_bind_tools'),patch.object(s,'assignment',return_value={}), \
-                 patch.object(s,'propose_final',side_effect=unsettled), \
-                 patch('scisaurus.runtime.mission_research.MissionResearchClient',Primary), \
-                 patch.object(c,'_finish',side_effect=lambda:{'status':c.status}):
-                self.assertEqual(s.run()['status'],'paused')
 
     def test_policy_rejects_mutated_question_owner_or_missing_pointer(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -202,51 +183,22 @@ class MissionResearchTests(unittest.TestCase):
         cache=ModelWorkCache(c.store,c._publish,namespace='command/foundry-work');record=cache.put('test',{'assignment':assignment,'status':'blocked'})
         return record['cache_ref'],assignment
 
-    def test_frozen_assignment_accepts_actual_owner_and_rejects_old_version(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            c=self.runner(Path(tmp));s=MissionResearchSession(c);ref,assignment=self.frozen(c)
-            self.assertEqual(s._frozen_assignment(ref)[1],assignment)
-            cache=ModelWorkCache(c.store,c._publish,namespace='command/foundry-work');cache.put('test',{'assignment':assignment,'status':'pending'})
-            with self.assertRaises(StateError):s._frozen_assignment(ref)
 
     def test_tools_keep_researcher_computation_and_explicit_independent_evaluation(self):
         with tempfile.TemporaryDirectory() as tmp:
             c=self.runner(Path(tmp));s=MissionResearchSession(c);tools=s.tools()['actions']
-            self.assertIn('run',tools);self.assertIn('evaluate_pilot',tools);self.assertIn('record_checkpoint',tools)
+            self.assertIn('run',tools);self.assertIn('request_review',tools);self.assertIn('acquire',tools);self.assertNotIn('evaluate_pilot',tools);self.assertIn('record_checkpoint',tools)
             self.assertNotIn('choose_topic',tools)
 
-    def test_known_rejection_is_feedback_unknown_stays_pending_and_revokes(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            c=self.runner(Path(tmp));self.authorize(c);s=MissionResearchSession(c)
-            action={'operation':'evaluate_pilot','arguments':{'source':'model-owned'}}
-            known=ModelWorkBlocked('scientific review rejected candidate');known.repair_feedback={'gate':'adversarial_review','checks':[]}
-            with patch.object(s,'_evaluate',side_effect=known),patch.object(c,'_sync_foundry_usage'):
-                observation=s.operation(action)
-            self.assertEqual(observation['outcome'],'failed');self.assertIsNone(s.state['pending_evaluation'])
-            unknown=DshBatchError('weekly quota',receipt='/unavailable/receipt',usage={'model_calls':39})
-            with patch.object(s,'_evaluate',side_effect=unknown),patch.object(c,'_sync_foundry_usage'):
-                with self.assertRaises(DshBatchError):s.operation({'operation':'evaluate_pilot','arguments':{'source':'revised'}})
-            self.assertTrue(s.state['pending_evaluation'])
-            with self.assertRaises(StateError):s.guard()
-            self.assertEqual(c.usage.get('model_calls',0),0)
 
     def test_workbench_reuse_revalidates_instead_of_replaying_outer_cache(self):
         with tempfile.TemporaryDirectory() as tmp:
             c=self.runner(Path(tmp));self.authorize(c);s=MissionResearchSession(c);s.workbench=Mock()
-            s.workbench.execute.return_value={'receipt_ref':'software:sha256:current','result':{'checked':True}}
+            s.workbench.execute.return_value={'outcome':'ok','receipt_ref':'software:sha256:current','result':{'checked':True}}
             action={'operation':'inspect_runtime','arguments':{'runtime':'python'}}
             s.operation(action);s.operation(action)
             self.assertEqual(s.workbench.execute.call_count,2)
 
-    def test_unknown_computation_holds_expansion_and_revokes_authorization(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            c=self.runner(Path(tmp));self.authorize(c);s=MissionResearchSession(c);s.workbench=Mock()
-            s.workbench.execute.return_value={'outcome':'result_unknown','receipt_ref':'software:unknown','usage':{}}
-            with self.assertRaises(DshBatchError):
-                s.operation({'operation':'run','arguments':{'purpose':'scientific_computation'}})
-            self.assertTrue(s.state['pending_evaluation'])
-            self.assertIsNone(json.loads((c.root/'output/run-control.json').read_bytes()).get('research_resume_authorization_ref'))
-            self.assertEqual(s._read_head(s.state['pending_evaluation'])['status'],'result_unknown')
 
     def test_primary_unknown_requires_exact_paid_checkpoint_and_preserves_history(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -294,18 +246,8 @@ class MissionResearchTests(unittest.TestCase):
                 self.assertEqual(len(development.state['calls']),1)
                 self.assertEqual(development.transport_history[0]['status'],'result_unknown')
             self.assertEqual({key:c.usage[key] for key in usage},usage)
-            with self.assertRaises(StateError):s.guard()
+            s.guard()
 
-    def test_known_experiment_rejection_reuses_feedback_without_unknown_hold(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            c=self.runner(Path(tmp));self.authorize(c);s=MissionResearchSession(c)
-            feedback={'outcome':'failed','result':{'status':'research_expansion_required'},'artifact_ref':'current-rejection'}
-            action={'operation':'evaluate_pilot','arguments':{'candidate':'same'}}
-            with patch.object(s,'_evaluate',return_value=feedback) as evaluate,patch.object(s,'_validated_result') as validate:
-                self.assertEqual(s.operation(action),feedback)
-                self.assertEqual(s.operation(action),feedback)
-                evaluate.assert_called_once();validate.assert_not_called()
-            self.assertIsNone(s.state['pending_evaluation']);s.guard()
 
     def test_first_turn_controller_failure_records_explicit_unknown(self):
         from scisaurus.tests.test_dsh_batch import BatchTests
@@ -340,78 +282,11 @@ class MissionResearchTests(unittest.TestCase):
             c.status='running';c.mission_time_ledger.switch('survey');s.save('note_recorded')
             self.assertEqual(c.mission_time_ledger.active_kind,'survey')
             c.mission_time_ledger.used['support']=1
-            with self.assertRaisesRegex(ModelWorkBlocked,'support allocation'):s.guard()
+            s.guard()
+            self.assertEqual(c.mission_time_ledger.used['support'],1)
 
-    def test_optional_worker_setting_keeps_logical_capacity_and_caps_actual_workers(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            c=self.runner(Path(tmp));self.authorize(c);s=MissionResearchSession(c);s.deadline=time.monotonic()+120
-            ref,assignment=self.frozen(c)
-            stage=next(stage for stage in c.workflow['stages'] if stage['id']=='experiment')
-            config=json.loads(Path(stage['config_path']).read_bytes())
-            config['limits']={'concurrent_calls':3,'wall_clock_seconds':120}
-            config['experiment']={'literature_gate':{}}
-            config['limits'].pop('worker_concurrency',None)
-            Path(stage['config_path']).write_bytes(canonical_bytes(config))
-            descriptor=Path(tmp)/'descriptor.json';descriptor.write_bytes(canonical_bytes({'experiment':config['experiment']}))
-            foundry=Mock();foundry.generate.return_value={'registration':{'descriptor_path':str(descriptor)},'admission':{}}
-            backend={'author_backend':{'model':'fixed','max_output_tokens':32768}}
-            args={'assignment_ref':ref,'candidate':{'executor_source':'current','experiment_intent':{'research_question':fixtures.QUESTION}},'external_review_dispositions':[]}
-            with patch.object(s,'_frozen_assignment',return_value=(stage,assignment)),patch.object(s,'_adjudicate_reviews'), \
-                 patch.object(s,'_foundry',return_value=(backend,foundry)),patch.object(c,'_apply_bindings',side_effect=lambda evaluation,bindings:evaluation), \
-                 patch.object(c,'_sync_foundry_usage'),patch('scisaurus.runtime.experiment.ExperimentRunner') as runner:
-                runner.return_value.run.return_value={'status':'research_expansion_required','usage':{'cumulative_usage':{'model_calls':1}}}
-                observation=s._evaluate(args,'offline')
-            actual=runner.call_args.args[1]['limits']
-            self.assertEqual(actual['concurrent_calls'],config['limits']['concurrent_calls'])
-            self.assertGreaterEqual(actual['concurrent_calls'],3)
-            self.assertLessEqual(actual['worker_concurrency'],2)
-            self.assertEqual(observation['outcome'],'failed')
-            self.assertEqual(c.usage['model_calls'],1)
 
-    def test_stage_bindings_cannot_replace_admitted_researcher_science(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            c=self.runner(Path(tmp));self.authorize(c);s=MissionResearchSession(c);s.deadline=time.monotonic()+120
-            ref,assignment=self.frozen(c)
-            stage=next(stage for stage in c.workflow['stages'] if stage['id']=='experiment')
-            config=json.loads(Path(stage['config_path']).read_bytes())
-            config['experiment']={'literature_gate':{}}
-            Path(stage['config_path']).write_bytes(canonical_bytes(config))
-            descriptor=Path(tmp)/'descriptor.json'
-            descriptor.write_bytes(canonical_bytes({'experiment':{'literature_gate':{},'execution':{'source':'current'}}}))
-            foundry=Mock();foundry.generate.return_value={'registration':{'descriptor_path':str(descriptor)},'admission':{}}
-            def overwrite(evaluation,bindings):
-                evaluation['experiment']['execution']['source']='legacy'
-                return evaluation
-            args={'assignment_ref':ref,'candidate':{'executor_source':'current','experiment_intent':{'research_question':fixtures.QUESTION}},'external_review_dispositions':[]}
-            with patch.object(s,'_frozen_assignment',return_value=(stage,assignment)),patch.object(s,'_adjudicate_reviews'), \
-                 patch.object(s,'_foundry',return_value=({'author_backend':{'model':'fixed','max_output_tokens':32768}},foundry)), \
-                 patch.object(c,'_apply_bindings',side_effect=overwrite), \
-                 patch('scisaurus.runtime.experiment.ExperimentRunner') as runner:
-                with self.assertRaisesRegex(StateError,'stage bindings|Stage bindings'):
-                    s._evaluate(args,'offline')
-                runner.assert_not_called()
 
-    def test_final_audit_interruption_seals_started_owner_before_dispatch(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            c=self.runner(Path(tmp));self.authorize(c);s=MissionResearchSession(c)
-            for stage_id in c.workflow['completion']['required_stage_ids']:
-                if stage_id!='experiment':c.stage_records.setdefault(stage_id,{})['status']='completed'
-            s.state['result_ref']='current'
-            body={'stage_id':'experiment','result':{'status':'completed'},
-                'foundry':{'candidate':{'executor_source':'current','experiment_intent':{'research_question':fixtures.QUESTION}}}}
-            def interrupted(**kwargs):
-                with self.assertRaisesRegex(StateError,'reconciliation'):c._require_settled_research_operations()
-                raise RuntimeError('interrupted independent dispatch')
-            with patch.object(s,'_validated_result',return_value=(body,{'question':fixtures.QUESTION},{})), \
-                 patch.object(c,'_software_author_backend_config',return_value={'author_backend':{'command':[sys.executable]},'runtime_python':sys.executable}), \
-                 patch('scisaurus.runtime.mission_research.DshStructuredProducerClient') as client:
-                client.return_value.complete.side_effect=interrupted
-                with self.assertRaisesRegex(RuntimeError,'interrupted'):
-                    s.propose_final({'result_ref':'current','summary':'current claim','limitations':[]})
-                with self.assertRaisesRegex(StateError,'reconciliation'):
-                    s.propose_final({'result_ref':'current','summary':'changed claim','limitations':[]})
-                self.assertEqual(client.return_value.complete.call_count,1)
-                self.assertNotIn('development_session',client.call_args.kwargs)
 
     def test_started_final_recovery_requires_actual_receipt_and_preserves_paid_unknown(self):
         from scisaurus.runtime.mission_research import digest
@@ -482,70 +357,7 @@ class MissionResearchTests(unittest.TestCase):
             with patch.object(s,'_primary_receipt',return_value=str(foreign)):s._charge_primary_receipt()
             self.assertEqual(c.usage.get('model_calls',0),0)
 
-    def test_final_requires_current_evidence_even_with_primary_confidence(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            c=self.runner(Path(tmp));self.authorize(c);s=MissionResearchSession(c)
-            with self.assertRaises(ModelWorkBlocked):s.propose_final({'result_ref':'artifact:fake@1','summary':'It succeeded','limitations':[]})
-            self.assertIsNone(s.final)
 
-    def test_full_primary_tool_loop_final_requires_fresh_separate_scope_verdict(self):
-        for accepted in (False,True):
-            with self.subTest(accepted=accepted),tempfile.TemporaryDirectory() as tmp:
-                c=self.runner(Path(tmp));self.authorize(c)
-                prior=deepcopy(c.context)
-                for stage_id in c.workflow['completion']['required_stage_ids']:
-                    if stage_id!='experiment':c.stage_records.setdefault(stage_id,{})['status']='completed'
-                evaluated=c._publish('command/research-session/results/offline','decision_note',{'offline':True},'command.research-session')
-                final={'result_ref':evaluated['artifact_ref'],'summary':'Current source and observations resolve the stated question.', 'limitations':['Only the declared model scope.']}
-                body={'stage_id':'experiment','result':{'status':'completed','usage':{}},
-                      'foundry':{'candidate':{'executor_source':'complete current source','experiment_intent':{'research_question':fixtures.QUESTION}}}}
-                s=MissionResearchSession(c);s.state['result_ref']=evaluated['artifact_ref']
-                independent_calls=[]
-                class Independent:
-                    def __init__(self,*args,**kwargs):
-                        independent_calls.append(kwargs)
-                        self.assert_boundary=kwargs
-                    def complete(self,*,system,prompt):
-                        assignment=json.loads(prompt)
-                        verdict={'decision':'accepted' if accepted else 'hold','original_question_resolved':accepted,
-                            'evidence_sha256':assignment['evidence_sha256'],'rationale':'Declared comparison has current evidence.' if accepted else 'The pilot does not resolve the original question.',
-                            'limitations':['Declared physical model only.']}
-                        usage={'model_calls':1,'input_tokens':35,'output_tokens':10}
-                        backend={'author_backend':{'timeout_seconds':120,'command':[sys.executable]},'runtime_python':sys.executable}
-                        receipt=write_final_audit_receipt(self.assert_boundary['root'],assignment,backend,verdict,usage)
-                        return ModelResult(json.dumps(verdict),'independent',usage,0,'stop',response_metadata={'receipt':receipt})
-                class Primary:
-                    def __init__(self,*args,**kwargs):self.options=kwargs
-                    def complete(self,*,system,prompt):
-                        assignment=json.loads(prompt)
-                        changed=self.options['tool_exchange']({'tool_action':{'operation':'record_checkpoint','arguments':{'phase':'experiment','note':'Current interpretation follows the recorded pilot.','evidence_refs':[]}}},assignment,{'model_calls':1,'input_tokens':50})
-                        feedback=self.options['final_exchange']({'final':final},changed,{'model_calls':2,'input_tokens':80})
-                        if accepted:
-                            if feedback is not None:raise AssertionError(str(feedback))
-                        else:
-                            if not feedback or not feedback.get('final_feedback'):raise AssertionError('limited result incorrectly completed')
-                        return ModelResult(json.dumps({'final':final}),'primary',{'model_calls':2,'input_tokens':80},0,'stop',response_metadata={'receipt':'None'})
-                with patch.object(c,'_software_author_backend_config',return_value={'author_backend':{'timeout_seconds':120,'command':[sys.executable]},'runtime_python':sys.executable}), \
-                     patch.object(s,'_bind_tools'),patch.object(s,'assignment',return_value={'checkpoint':{},'scientific_software_tools':s.tools()}), \
-                     patch.object(s,'_validated_result',return_value=(body,{'question':fixtures.QUESTION}, {'observations':[{'measured':1}]})), \
-                     patch('scisaurus.runtime.mission_research.MissionResearchClient',Primary), \
-                     patch('scisaurus.runtime.mission_research.DshStructuredProducerClient',Independent), \
-                     patch.object(c,'_finish',side_effect=lambda:{'status':c.status}),patch.object(c,'_settle_stage_work_orders'):
-                    result=s.run()
-                self.assertEqual(len(independent_calls),1,c.blockers)
-                self.assertNotIn('development_session',independent_calls[0])
-                self.assertNotIn('receipt_inputs',independent_calls[0])
-                self.assertEqual(c.usage.get('model_calls'),3)
-                self.assertEqual(c.context['topic'],prior['topic'])
-                if accepted:
-                    self.assertEqual(result['status'],'completed')
-                    self.assertEqual(c.stage_records['experiment']['status'],'completed')
-                    self.assertTrue(c.context['experiment']['prior_context_ref'])
-                    self.assertNotIn('experiment',c.continuation_pending_stage_ids)
-                else:
-                    self.assertEqual(result['status'],'paused')
-                    self.assertEqual(c.context,prior)
-                    self.assertIn('experiment',c.continuation_pending_stage_ids)
 
     def test_frontier_unknown_blocks_recovery_even_with_external_confirmation(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -576,6 +388,78 @@ class MissionResearchTests(unittest.TestCase):
             self.assertEqual(result['status'],'registered')
             self.assertGreater(foundry.validator_client.calls,0)
             self.assertGreater(foundry.reviewer_client.calls,0)
+
+
+    def test_primary_loop_owns_tools_interpretation_and_finish_without_stage_authors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            c=self.runner(Path(tmp));self.authorize(c);s=MissionResearchSession(c)
+            previous=deepcopy(c.context);stage_records=deepcopy(c.stage_records)
+            c.laboratory_binding=Mock();c.laboratory_binding.context.return_value={'runtimes':['installed']}
+            bench=Mock();bench.execute.side_effect=[{'outcome':'failed','stderr':'wrong input'}, {'outcome':'ok','stdout':'actual output'}]
+            primary_kwargs=[]
+            class Primary:
+                def __init__(self,*args,**kwargs):
+                    primary_kwargs.append(kwargs);self.runner=Mock();self.runner.task_contract={}
+                def complete(self,*,system,prompt):
+                    packet=json.loads(prompt)
+                    if 'output_contract' in packet:raise AssertionError('author schema survived')
+                    execute=self.runner.native_tool_handler
+                    if execute({'operation':'run','arguments':{'source':'first','runtime':'installed'}})['outcome']!='failed':raise AssertionError('failed result lost')
+                    execute({'operation':'run','arguments':{'source':'corrected','runtime':'installed'}})
+                    execute({'operation':'record_checkpoint','arguments':{'phase':'arbitrary primary phase','note':'working interpretation'}})
+                    execute({'operation':'finish','arguments':{'summary':'limited result; independently unreviewed'}})
+                    return ModelResult(json.dumps({'notes':'free text'}),'fixed',{'model_calls':2},0,'stop',response_metadata={'receipt':'offline-primary'})
+            with patch.object(c,'_software_author_backend_config',return_value={'author_backend':{'timeout_seconds':120},'runtime_python':sys.executable}), \
+                 patch('scisaurus.runtime.mission_research.prepare_primary_backend',side_effect=lambda backend,*args:backend), \
+                 patch('scisaurus.runtime.mission_research.SoftwareWorkbench',return_value=bench),patch.object(s,'_bind_tools'), \
+                 patch('scisaurus.runtime.mission_research.MissionResearchClient',Primary), \
+                 patch('scisaurus.runtime.requested_review.request_review') as review,patch.object(c,'_run_stage') as legacy, \
+                 patch.object(c,'_finish',side_effect=lambda:{'status':c.status}):
+                result=s.run()
+            self.assertEqual(result['status'],'research_finished',c.blockers)
+            review.assert_not_called();legacy.assert_not_called();self.assertEqual(bench.execute.call_count,2)
+            self.assertEqual(primary_kwargs[0]['development_session'],development_session_binding(c.root))
+            self.assertNotIn('tool_exchange',primary_kwargs[0]);self.assertNotIn('final_exchange',primary_kwargs[0])
+            self.assertEqual(c.context,previous);self.assertEqual(c.stage_records,stage_records)
+            self.assertEqual(c.usage['model_calls'],2);self.assertEqual(s.state['latest_reply'],{'notes':'free text'})
+
+    def test_requested_hold_is_feedback_and_usage_owner_matches_reconciliation(self):
+        from scisaurus.runtime.requested_review import review_usage_owner
+        with tempfile.TemporaryDirectory() as tmp:
+            c=self.runner(Path(tmp));self.authorize(c);s=MissionResearchSession(c)
+            configured={'author_backend':{},'runtime_python':sys.executable}
+            def reviewer(*args,**kwargs):
+                kwargs['record']({'status':'completed','receipt':'isolated-receipt','usage':{'model_calls':3},'feedback':{'notes':'hold: incomplete evidence'}})
+                return {'outcome':'ok','feedback':{'notes':'hold: incomplete evidence'}}
+            with patch.object(c,'_software_author_backend_config',return_value=configured),patch('scisaurus.runtime.requested_review.request_review',side_effect=reviewer) as review:
+                feedback=s.operation({'operation':'request_review','arguments':{'task':'check claim','evidence':{'raw':[1]}}})
+            self.assertIn('hold',feedback['feedback']['notes']);self.assertEqual(c.usage['model_calls'],3)
+            s._charge(review_usage_owner('isolated-receipt'),{'model_calls':3})
+            self.assertEqual(c.usage['model_calls'],3)
+            self.assertEqual(review.call_args.kwargs['isolated_from'],[c.root])
+            s.operation({'operation':'record_checkpoint','arguments':{'note':'interpret reviewer feedback'}})
+
+
+    def test_no_policy_defaults_to_primary_and_never_stage_authors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            c=self.runner(Path(tmp))
+            with patch.object(c,'_research_process_policy',return_value=None), \
+                 patch.object(c,'_prepare_primary_owner',return_value={'mode':'session_led'}) as bind, \
+                 patch.object(MissionResearchSession,'run',return_value={'status':'research_checkpoint'}) as primary, \
+                 patch.object(c,'_run_stage_graph') as legacy:
+                self.assertEqual(c._run_authorized()['status'],'research_checkpoint')
+                bind.assert_called_once();primary.assert_called_once();legacy.assert_not_called()
+
+    def test_default_owner_binding_does_not_require_an_admitted_research_question(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            c=fixtures.ExperimentReviewHandoffTests().stopped(Path(tmp));self.addCleanup(c.close)
+            c.context={};c.laboratory_binding=Mock()
+            directory=c.root/'development-session';directory.mkdir()
+            (directory/'session.json').write_bytes(canonical_bytes({'session_id':'retained-session','binding':development_session_binding(c.root),'calls':[],'active_job':None}))
+            with patch.object(c,'_software_author_backend_config',return_value={'author_backend':{}}):
+                policy=c._prepare_primary_owner()
+            self.assertEqual(policy['mode'],'session_led');self.assertEqual(policy['session_id'],'retained-session')
+            self.assertEqual(c.context,{})
 
 
 if __name__=='__main__':unittest.main()

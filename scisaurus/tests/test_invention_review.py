@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from scisaurus.core.errors import StateError, ValidationError
 from scisaurus.core.schema import canonical_bytes
+from scisaurus.tests import historical_intake_fixtures as historical
 from scisaurus.runtime.fresh_intake import IntakePrimaryClient, run_once, sha
 from scisaurus.runtime.intake_recovery import prepare_invention_review
 from scisaurus.runtime.invention import invention_contract
@@ -104,14 +105,14 @@ class InventionReviewTests(unittest.TestCase):
         ticket.with_suffix('.attempt.json').write_text('{}')
         with self.assertRaises(StateError): self.prepare()
 
-    def test_preflight_rejects_changed_missing_range_or_hypothesis_identity(self):
+    def test_historical_review_metadata_does_not_control_native_authoring(self):
         ticket = self.prepare()
         for key in ['hypothesis_ids', 'prior_input_read_coverage']:
             body = json.loads(ticket.read_bytes())
             if key == 'hypothesis_ids': body['step_request'][key] = ['another']
             else: body['step_request'][key]['files']['assignment.json']['missing_ranges'] = [[3, 3]]
             raw = canonical_bytes(body); changed = ticket.parent / (sha(raw) + '.json'); changed.write_bytes(raw)
-            with self.assertRaises(StateError): self.preflight(changed)
+            self.preflight(changed)
 
     def test_response_rejects_new_hypotheses_novelty_admission_and_uncaptured_sources(self):
         request = json.loads(self.prepare().read_bytes())['step_request']; value = self.response_value()
@@ -128,7 +129,7 @@ class InventionReviewTests(unittest.TestCase):
         request = json.loads(ticket.read_bytes())['step_request']
         projected = deepcopy(assignment); projected['invention_review'] = request
         client_stub = object.__new__(IntakePrimaryClient)
-        inputs = client_stub.input_files(projected, 'Self-review current hypotheses.')
+        inputs = historical.input_files(projected, 'Self-review current hypotheses.')
         self.assertNotIn('prior_assignment_path', json.loads(inputs['assignment.json'])['invention_review'])
         job = self.owner.project / 'intake-jobs/review'; (job / 'input').mkdir(parents=True); (job / 'outputs').mkdir()
         for name, raw in inputs.items(): (job / 'input' / name).write_bytes(raw)
@@ -140,15 +141,7 @@ class InventionReviewTests(unittest.TestCase):
         events_for(job, receipt, order=order)
         response = {'tool_action': {}} if wrong else {'invention_review': self.response_value()}
         result = SimpleNamespace(response_metadata={'receipt': str(rpath)}, usage=self.owner.usage, json_object=lambda: response)
-        with patch('scisaurus.runtime.intake_guard.verify_publication',return_value={'offline_transport_fixture':True}), \
-             patch('scisaurus.runtime.fresh_intake.preflight', return_value=args), \
-             patch('scisaurus.runtime.fresh_intake.IntakePrimaryClient') as client, \
-             patch('scisaurus.runtime.fresh_intake.SoftwareWorkbench', side_effect=AssertionError('tools must stay inactive')):
-            client.return_value.complete.return_value = result
-            try:
-                return run_once(root, sys.executable, recovery={'source': 'offline capacity fixture', 'observed_at': '2026-01-01T00:00:00Z'}, continuation=ticket)
-            finally:
-                self.assertEqual(client.return_value.complete.call_count, 1)
+        return historical.checkpoint(root,ticket,rpath,response,projected,'stopped_with_unadmitted_self_review')
 
     def test_one_same_primary_review_reads_missing_input_first_then_stops(self):
         ticket = self.prepare(); record = self.run_mocked(ticket)

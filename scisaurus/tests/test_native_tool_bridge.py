@@ -86,6 +86,27 @@ class BridgeTests(unittest.TestCase):
             'action':{'operation':'run','arguments':args}}})
         self.handler.assert_called_once_with({'operation':'run','arguments':args})
 
+    def test_known_error_and_failed_computation_leave_primary_running(self):
+        for value in [ValidationError('wrong input'),{'outcome':'failed','stderr':'program error'}]:
+            with self.subTest(value=value):
+                self.bridge.calls.clear();self.bridge.failed=False
+                self.action={'operation':'check_environment','arguments':{}}
+                request=self.request();request['params']['callId']='call-'+str(len(self.state.get('native_tool_calls',[])))
+                self.bridge.calls[request['params']['callId']]=self.bridge.calls.pop('call')
+                self.handler.side_effect=value if isinstance(value,Exception) else None
+                self.handler.return_value=value
+                self.bridge.respond(request)
+                self.assertFalse(self.bridge.failed)
+                result=json.loads((self.bridge.directory/self.state['native_tool_calls'][-1]['response_file']).read_bytes())
+                self.assertNotIn('terminal',result)
+
+    def test_nested_unknown_keeps_its_receipt_usage_and_terminal_status(self):
+        error=DshBatchError('unknown review',receipt='/owned/review/receipt.json',usage={'model_calls':3})
+        self.handler.side_effect=error;self.bridge.respond(self.request())
+        result=json.loads((self.bridge.directory/self.state['native_tool_calls'][-1]['response_file']).read_bytes())
+        self.assertTrue(result['terminal']);self.assertEqual(result['dispatch']['receipt'],error.receipt)
+        self.assertEqual(result['dispatch']['usage'],error.usage)
+
 
 class RunArgumentTests(unittest.TestCase):
     def test_required_reference_artifact_and_runtime_contracts_are_checked_before_execution(self):
@@ -104,7 +125,7 @@ class RunArgumentTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get('SCISAURUS_DSH_CONFIG'),'explicit installed runtime configuration required')
 class InstalledRuntimeTests(unittest.TestCase):
-    def exercise(self,failure=False,run_program=False):
+    def exercise(self,failure=False,run_program=False,review=False):
         requests=[]
         laboratory=None;runtime_label=None
         if run_program:
@@ -125,7 +146,10 @@ class InstalledRuntimeTests(unittest.TestCase):
                     if run_program:name='research_run';args={'runtime':runtime_label,
                         'source':'import json\nprint(json.dumps({"value": 2 + 2}))\n','input':{},
                         'purpose':'scientific_computation','expected':None}
-                elif len(requests)==2:
+                elif review:name=None
+                elif failure and len(requests)==2:
+                    name='research_tool';args={'operation':'check_environment','arguments':{}}
+                elif len(requests)==(3 if failure else 2):
                     name='write';args={'file_path':'response.json','content':'{"note":"Unadmitted local tool checkpoint"}'}
                 else:name=None
                 if name:
@@ -147,34 +171,52 @@ class InstalledRuntimeTests(unittest.TestCase):
                 config['read_roots'].append(str(root));config=guard_backend(config,root/'contract',sys.executable,work_mode=True)
                 os.environ['DSH_OFFLINE_KEY']='synthetic-localhost-only'
                 os.environ.pop('SCISAURUS_RUN_CONTROL',None);os.environ.pop('SCISAURUS_RUN_GENERATION',None)
+                if review:
+                    from scisaurus.runtime.requested_review import request_review
+                    producer=root/'producer';producer.mkdir();(producer/'private-history.txt').write_text('private fixture history')
+                    records=[]
+                    result=request_review({'author_backend':config,'runtime_python':sys.executable},producer/'reviews',
+                        {'task':'check current raw','evidence':{'raw':[1,2]}},deadline=time.monotonic()+30,
+                        isolated_from=[producer],record=records.append)
+                    self.assertIn('Checkpoint saved.',result['feedback']['notes'])
+                    self.assertEqual([x['status'] for x in records],['started','completed'])
+                    rp=Path(records[-1]['receipt']);receipt=json.loads(rp.read_bytes())
+                    self.assertNotIn('development_session',receipt);self.assertTrue(receipt['process_reaped'])
+                    _verify_receipt_files(rp,receipt)
+                    names={t['function']['name'] for t in requests[0]['tools']}
+                    self.assertIn('research_run',names);self.assertNotIn('write',names);self.assertNotIn('edit',names)
+                    return
                 assignment=work_assignment({'objective':'Offline interface fixture'},{'kind':'research_work','checkpoint':{}})
                 record={};bench=SoftwareWorkbench(root/'software',deadline=time.monotonic()+30,laboratory=laboratory)
                 execute=native_tool_handler(assignment,bench,record)
-                if failure:execute=Mock(side_effect=ValidationError('offline controlled tool failure'))
+                if failure:execute=Mock(side_effect=[ValidationError('offline controlled tool failure'),{'outcome':'ok','receipt_ref':'corrected-check'}])
                 runner=DshBatchRunner(config,root=root/'jobs',runtime_read_roots=[str(Path(sys.executable).absolute().parent.parent)],
                     required_startup_marker=GUARD_READY,forbid_reasoning=True)
                 runner.task_contract={**guarded_backend(config),'mode':'research_work','input_delivery':'inline','native_controller_tools':True}
                 runner.native_tool_handler=execute
-                try:result=runner.run(work_instructions(),inputs={'assignment.json':json.dumps(assignment)},outputs=['response.json'])
-                except DshBatchError as error:
-                    if not failure:raise
-                    self.assertEqual(len(requests),1);self.assertEqual(error.usage['model_calls'],1)
-                    receipt=json.loads(Path(error.receipt).read_bytes());self.assertTrue(receipt['process_reaped'])
-                    self.assertEqual(receipt['native_tool_calls'][0]['outcome'],'error');return
-                self.assertFalse(failure);self.assertEqual(len(requests),3);self.assertTrue(record['observations'])
-                self.assertEqual(record['observations'][0]['outcome'],'ok');self.assertEqual(json.loads(result['files']['response.json'])['note'],'Unadmitted local tool checkpoint')
+                result=runner.run(work_instructions(),inputs={'assignment.json':json.dumps(assignment)},outputs=['response.json'])
+                self.assertEqual(len(requests),4 if failure else 3)
+                if failure:
+                    self.assertEqual(execute.call_count,2)
+                    self.assertIn('offline controlled tool failure',json.dumps(requests[1]['messages']))
+                    self.assertIn('corrected-check',json.dumps(requests[2]['messages']))
+                else:
+                    self.assertTrue(record['observations'])
+                    self.assertEqual(record['observations'][0]['outcome'],'ok')
+                self.assertEqual(json.loads(result['files']['response.json'])['note'],'Unadmitted local tool checkpoint')
                 if run_program:
                     self.assertEqual(record['observations'][0]['result']['output'],{'value':4})
                 rp=Path(result['receipt']);receipt=json.loads(rp.read_bytes());self.assertTrue(receipt['process_reaped']);self.assertTrue(receipt['outcome_known'])
                 _verify_receipt_files(rp,receipt)
                 names={t['function']['name'] for t in requests[0]['tools']};self.assertIn('research_tool',names);self.assertNotIn('bash',names)
                 signature=next(t['function']['parameters'] for t in requests[0]['tools'] if t['function']['name']=='research_run')
-                self.assertEqual(set(signature['required']),{'source','input','purpose','expected'})
+                self.assertEqual(set(signature['required']),{'source'})
                 self.assertIn('JSON object',signature['properties']['source']['description'])
-                self.assertIn('receipt_ref',json.dumps(requests[1]['messages']))
+                self.assertIn('receipt_ref',json.dumps(requests[2 if failure else 1]['messages']))
         finally:server.shutdown();server.server_close();thread.join()
     def test_installed_native_controller_roundtrip(self):self.exercise()
-    def test_failed_native_controller_stops_before_another_request(self):self.exercise(failure=True)
+    def test_requested_isolated_review_uses_native_tools_without_author_or_schema(self):self.exercise(review=True)
+    def test_known_tool_error_is_feedback_and_same_session_corrects_it(self):self.exercise(failure=True)
     @unittest.skipUnless(os.environ.get('SCISAURUS_LAB_CONFIG') and os.environ.get('SCISAURUS_LAB_ATTESTATION'),
         'explicit attested laboratory configuration required')
     def test_native_computation_executes_in_attested_runtime(self):self.exercise(run_program=True)

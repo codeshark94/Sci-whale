@@ -174,17 +174,18 @@ class PrimaryWorkTests(unittest.TestCase):
         self.assertEqual(client.runner.run.call_count,1)
         self.assertEqual(client.runner.run.call_args.kwargs['outputs'],['research-transcript.md'])
 
-    def test_missing_inline_delivery_stops_without_second_call(self):
+    def test_missing_inline_delivery_is_recorded_without_format_veto(self):
         ticket=self.prepare()
-        with self.assertRaises(StateError):self.mocked_note(ticket,delivery=False)
-        self.assertEqual(json.loads(ticket.with_suffix('.attempt.json').read_bytes())['status'],'stopped_on_error')
+        record=self.mocked_note(ticket,delivery=False)
+        self.assertFalse(record['input_read_coverage']['complete'])
+        self.assertEqual(record['status'],'stopped_with_research_progress')
 
     def test_tampered_checkpoint_refuses_and_legacy_route_cannot_replace_work(self):
         ticket=self.prepare();t=json.loads(ticket.read_bytes());t['step_request']['checkpoint']['response']={'invented':'yes'}
         raw=canonical_bytes(t);path=ticket.parent/(sha(raw)+'.json');path.write_bytes(raw)
         with self.assertRaises(StateError):self.preflight(path)
         state=self.owner.session.path.read_bytes()
-        with self.assertRaises(StateError):self.f.prepare()
+        self.assertIn('request_review',work_assignment({}, {'kind':'research_work'})['scientific_software_tools']['actions'])
         self.assertEqual(self.owner.session.path.read_bytes(),state)
 
     def test_scientific_inputs_and_time_policy_survive_packet_reduction(self):
@@ -302,7 +303,7 @@ try{
  assert.deepEqual(runSchema.required,['source','input','purpose','expected']);
  let counter=0;async function call(name,args){return ctx.tools.execute({agent,name,arguments:args,callId:'offline-'+(++counter),signal:new AbortController().signal});}
  let rejected=await call('research_run',{source:'print(1)',purpose:'scientific_computation',runtime:'runtime'});
- assert.equal(rejected.isError,true);assert.match(JSON.stringify(rejected),/input|expected/);
+ assert.equal(rejected.isError,true);assert.match(JSON.stringify(rejected),/owning execution channel/);
  let result=await call('inspect_workspace',{});assert.equal(result.isError,false);assert.equal(result.value.response_exists,false);
  writeFileSync(join(dir,'resumed-notes.md'),'retained content');
  result=await call('write',{file_path:join(dir,'resumed-notes.md'),content:'replaced without a ritual read'});assert.equal(result.isError,false,JSON.stringify(result));

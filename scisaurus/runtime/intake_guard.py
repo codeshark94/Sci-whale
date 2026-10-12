@@ -1,4 +1,4 @@
-"""Sealed native input and publication policy for one primary intake."""
+"""Source-pinned native tools and explicit legacy publication compatibility."""
 from copy import deepcopy
 import io
 import json
@@ -9,7 +9,7 @@ from scisaurus.core.errors import StateError
 from scisaurus.core.schema import canonical_bytes
 from scisaurus.runtime.fresh_intake import sha
 
-GUARD_READY = 'SCISAURUS_INTAKE_CONTRACT_READY:read-before-work-exact-publication-1'
+GUARD_READY = 'SCISAURUS_NATIVE_RESEARCH_READY:tools-feedback-checkpoints-1'
 
 
 def sealed_file(path, raw):
@@ -20,7 +20,7 @@ def sealed_file(path, raw):
     path.chmod(0o444)
 
 
-def guard_backend(backend, directory, runtime_python, *, work_mode=False):
+def guard_backend(backend, directory, runtime_python, *, work_mode=False, review_mode=False):
     """Freeze source-only validator code and a dedicated composition without changing routing."""
     source_root = Path(__file__).resolve().parents[2]
     buffer = io.BytesIO()
@@ -33,7 +33,7 @@ def guard_backend(backend, directory, runtime_python, *, work_mode=False):
         **{name:(source_root/'scripts/dsh'/name).read_bytes() for name in
            ('intake-contract.mjs','check-intake-response.py','stop-on-tool-error.mjs','research-tools.json')}}
     identity = sha(canonical_bytes({**{name:sha(raw) for name,raw in sources.items()},
-        **({'mode':'primary-work'} if work_mode else {})}))
+        **({'mode':'primary-review' if review_mode else 'primary-work'} if work_mode or review_mode else {})}))
     policy = Path(directory)/identity
     policy.mkdir(parents=True,exist_ok=True)
     for name,raw in sources.items():sealed_file(policy/name,raw)
@@ -42,16 +42,18 @@ def guard_backend(backend, directory, runtime_python, *, work_mode=False):
     for item in composition:
         if 'toolBash' in item.get('config', {}) or 'persona' in item.get('config', {}):
             item.setdefault('config', {})['toolBash'] = False
-    if work_mode:
+    if work_mode or review_mode:
         from scisaurus.runtime.primary_work import work_instructions
         composition=[item for item in composition
             if not item.get('name','').endswith('/fs-observation-policy/lib/index.js')]
         for item in composition:
             if 'persona' in item.get('config',{}):
-                item['config']['persona']=work_instructions()
-    composition.append({'id':'stop-on-tool-error','name':str((policy/'stop-on-tool-error.mjs').resolve())})
+                item['config']['persona']=('Independent read-only reviewer. Reply with evidence-grounded feedback; no research authorship or producer workspace.' if review_mode else work_instructions())
+    if not (work_mode or review_mode):
+        composition.append({'id':'stop-on-tool-error','name':str((policy/'stop-on-tool-error.mjs').resolve())})
     config={'python':str(Path(runtime_python).absolute()),'checker':str((policy/'check-intake-response.py').resolve()),
             'bundle':str((policy/'checker.zip').resolve())}
+    if work_mode or review_mode:config['mode']='research_review' if review_mode else 'research_work'
     composition.append({'id':'intake-contract','name':str((policy/'intake-contract.mjs').resolve()),'config':config})
     sealed_file(policy/'composition.json',canonical_bytes(composition))
     active=deepcopy(backend);active['composition']=str((policy/'composition.json').resolve())
@@ -67,14 +69,17 @@ def guarded_backend(backend):
     composition=json.loads(Path(backend['composition']).read_bytes())
     entries=[x for x in composition if x.get('id')=='intake-contract']
     stoppers=[x for x in composition if x.get('id')=='stop-on-tool-error']
-    if len(entries)!=1 or len(stoppers)!=1:
-        raise StateError('intake requires native read-before-work and error-stop policies')
+    work= len(entries)==1 and entries[0].get('config',{}).get('mode') in {'research_work','research_review'}
+    if len(entries)!=1 or len(stoppers)!=(0 if work else 1):
+        raise StateError('research runtime composition differs from its sealed tool mode')
     entry=entries[0];config=entry['config']
     for path in (entry['name'],config['checker'],config['bundle'],config['python']):
         if backend['pinned_files'].get(path)!=sha(Path(path).read_bytes()):
             raise StateError('native intake policy lost its source pin')
     source_root=Path(__file__).resolve().parents[2]/'scripts/dsh'
-    for item,name in ((entry,'intake-contract.mjs'),(stoppers[0],'stop-on-tool-error.mjs')):
+    policies = [(entry,'intake-contract.mjs')]
+    policies.extend((item,'stop-on-tool-error.mjs') for item in stoppers)
+    for item,name in policies:
         digest=sha(Path(item['name']).read_bytes())
         if digest!=backend['pinned_files'].get(item['name']) or digest!=sha((source_root/name).read_bytes()):
             raise StateError('native intake policy differs from its authoritative source')

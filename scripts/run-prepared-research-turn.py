@@ -24,7 +24,7 @@ def main():
             "provider_calls": 0, "capacity_confirmed": False, "controller": "fresh-intake-once"}))
     else:
         recovery = json.loads(Path(args.recovery).read_text()) if args.recovery else None
-        recovery_evidence(recovery)
+        if recovery is not None:recovery_evidence(recovery)
         from scisaurus.runtime.composer import load_runtime_environment_files
         load_runtime_environment_files(args.runtime_env_file)
         try:

@@ -462,7 +462,8 @@ class SoftwareWorkbenchTests(unittest.TestCase):
                             "assigned_role": "methods.methodologist", "response": response,
                             "software_tool_results": [receipt], "usage": {}}
                 bundle = {"reports": [produced], "by_role": {"methodologist": produced}, "usage": {}, "model_enabled": True}
-                with patch.object(runner, "_run_specialist_pool", return_value=bundle), \
+                with patch.object(runner, "_research_process_policy", return_value={"mode":"stage_graph"}), \
+                        patch.object(runner, "_run_specialist_pool", return_value=bundle), \
                         patch("scisaurus.runtime.software_discovery.accepted_survey_sources", return_value={"sources": []}), \
                         patch.object(runner, "_run_specialist_verifier") as reviewer:
                     with self.assertRaisesRegex(ValidationError, "exact receipt"):
@@ -663,7 +664,8 @@ class SoftwareWorkbenchTests(unittest.TestCase):
                     elif failure_mode == "scientific_hold":
                         response["decision"] = "hold"
             return ModelResult(json.dumps(response),"fixture",{"model_calls":1,"input_tokens":10,"output_tokens":10},0.001,"stop",1)
-        with patch.object(runner,"_specialist_model_config",return_value=model), \
+        with patch.object(runner,"_research_process_policy",return_value={"mode":"stage_graph"}), \
+                patch.object(runner,"_specialist_model_config",return_value=model), \
                 patch("scisaurus.runtime.software_discovery.accepted_survey_sources", return_value={"sources": []}), \
                 patch("scisaurus.runtime.composer.enforce_model_cost_limits",return_value=True), \
                 patch("scisaurus.runtime.specialists.ModelClient") as client, \

@@ -259,12 +259,13 @@ class ExplicitPreparationTests(IntakeAccountingTests):
 class IntakeResponseDeliveryTests(unittest.TestCase):
     def test_task_names_current_input_schema_and_writable_response_without_controller_search(self):
         from scisaurus.runtime.fresh_intake import IntakePrimaryClient
-        task = object.__new__(IntakePrimaryClient).task({})
-        self.assertIn('scientific_software_tools.response',task)
-        self.assertIn('output_contract.topic_selection',task)
-        self.assertIn('response.json directly in the declared writable workspace',task)
-        self.assertIn('already formatted',task)
-        self.assertIn('outside the read grants',task)
+        client=object.__new__(IntakePrimaryClient);client.runner=__import__('types').SimpleNamespace(task_contract={'mode':'research_work'})
+        task=client.task({})
+        self.assertIn('You choose the research steps',task)
+        self.assertIn('Known program, argument and file errors do not end your session',task)
+        self.assertIn('no response file or output schema is required',task)
+        self.assertNotIn('output_contract.topic_selection',task)
+
 
 
 class IntakeSandboxResponseTests(unittest.TestCase):
@@ -305,17 +306,7 @@ class IntakeTransportResponseTests(unittest.TestCase):
         fixture.setUp()
         try:
             script=Path(fixture.config['command'][1])
-            source=FAKE.replace("Path('answer.txt').write_text(str(n))", """Path('answer.txt').write_text(str(n))
-  task=p['contentBlocks'][0]['text']
-  if 'response.json directly' in task:
-   assert 'scientific_software_tools.response' in task
-   assert 'output_contract.topic_selection' in task
-   frozen=Path(task.split('Immutable task files: ',1)[1].split('\\n',1)[0])
-   a=json.loads((frozen/'assignment.json').read_bytes())
-   assert a['scientific_software_tools']['response']['tool_action']['operation']=='inventory'
-   assert 'already formatted' in task and 'outside the read grants' in task
-   Path('response.json').write_text(json.dumps({'tool_action':{'operation':'inventory'}}))
-""")
+            source=FAKE.replace("'usage':{'inputTokens':21,'outputTokens':8}","'message':{'content':[{'type':'text','text':'Free-form research notes.'}]},'usage':{'inputTokens':21,'outputTokens':8}")
             script.write_text(source)
             fixture.config['pinned_files'][str(script)]=digest(script.read_bytes())
             initial=fixture.dispatch()
@@ -324,11 +315,11 @@ class IntakeTransportResponseTests(unittest.TestCase):
                 client=IntakePrimaryClient(fixture.config,root=fixture.project/'intake-jobs',
                     runtime_python=sys.executable,development_session=fixture.binding,forbid_reasoning=True)
             client.runner.required_startup_marker=None
-            client.runner.task_contract=None
+            client.runner.task_contract={'mode':'research_work','input_delivery':'inline'}
             assignment={'scientific_software_tools':{'response':{'tool_action':{'operation':'inventory'}}},
                         'output_contract':{'topic_selection':{}},'frozen_scientific_input':None}
             result=client.complete(system='one response only',prompt=json.dumps(assignment))
-            self.assertEqual(result.json_object(),{'tool_action':{'operation':'inventory'}})
+            self.assertEqual(result.json_object(),{'notes':'Free-form research notes.'})
             after=json.loads((Path(fixture.binding['root'])/'session.json').read_bytes())
             self.assertEqual(after['session_id'],before['session_id'])
             self.assertEqual(after['calls'][0],before['calls'][0])
@@ -337,6 +328,6 @@ class IntakeTransportResponseTests(unittest.TestCase):
             value=json.loads(receipt.read_bytes())
             self.assertTrue(value['development_session']['resumed'])
             self.assertEqual(value['usage']['model_calls'],1)
-            self.assertEqual(json.loads((receipt.parent/'outputs/response.json').read_bytes()),result.json_object())
+            self.assertEqual((receipt.parent/'outputs/research-transcript.md').read_text(),result.json_object()['notes'])
         finally:
             fixture.tearDown()

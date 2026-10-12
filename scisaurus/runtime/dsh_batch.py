@@ -326,7 +326,7 @@ class DshBatchRunner:
                 contract_directory.mkdir()
                 contract_path = contract_directory / 'manifest.json'
                 manifest = {'workspace': str(work),
-                    'output': str(work / ('research-notes.md' if self.task_contract.get('mode') == 'research_work' else 'response.json')),
+                    'output': str(work / ('research-notes.md' if self.task_contract.get('mode') in {'research_work','research_review'} else 'response.json')),
                     'assignment': str(frozen / 'assignment.json'),
                     'inputs': {str(frozen / name): identity for name, identity in bound.items()},
                     'first_input': str(frozen / 'unread-input.txt') if 'unread-input.txt' in bound else None}
@@ -450,7 +450,7 @@ class DshBatchRunner:
                 if {name: sha256(directory / name) for name in hashes} != hashes:
                     raise RuntimeError("DSH job changed frozen task files")
             files = {}
-            if self.task_contract and self.task_contract.get('mode') == 'research_work' and 'research-transcript.md' in outputs:
+            if self.task_contract and self.task_contract.get('mode') in {'research_work','research_review'} and 'research-transcript.md' in outputs:
                 messages, seen = [], set()
                 turns = {identity[1] for identity in calls_seen if identity[0] == state['session_id']}
                 for line in journal.read_text().splitlines():
