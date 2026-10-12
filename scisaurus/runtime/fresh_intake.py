@@ -29,7 +29,13 @@ class IntakePrimaryClient(DshStructuredProducerClient):
                 "immutable assignment completely; it is already formatted for the read tool. Job and "
                 "controller directories are outside the read grants and contain no additional response schema. "
                 "Do not run local scientific substitutes or repair loops. "
-                "A failed local tool aborts this attempt; do not retry it or request another model step.")
+                "A failed local tool aborts this attempt; do not retry it or request another model step.") + (
+                " This is literature acquisition only: follow literature_acquisition, preserve its exact "
+                "candidate ids, and concatenate each candidate_literal_chunks field without added characters. "
+                "Return only collect_literature with one targeted OpenAlex query per candidate. Do not "
+                "make a new topic selection, perform local network retrieval, or claim literature was read. "
+                "The controller executes the batch once and retains metadata/abstracts, then stops."
+                if assignment.get("literature_acquisition") else "")
 
 
 def sha(body):
@@ -83,9 +89,29 @@ def preflight(root, runtime_python, *, continuation=None):
     if ticket:
         with DevelopmentSession(checkpoint["development_session"]).lease(backend, time.monotonic() + 2) as session:
             if (not session.state["calls"] or session.state["calls"][-1]["sha256"] != ticket["receipt_sha256"]
-                    or not session._reconciled_unknown(session.state["calls"][-1], json.loads(
-                        Path(session.state["calls"][-1]["receipt"]).read_bytes()))):
+                    or (ticket.get("prior_receipt_status", "result_unknown") == "result_unknown"
+                        and not session._reconciled_unknown(session.state["calls"][-1], json.loads(
+                            Path(session.state["calls"][-1]["receipt"]).read_bytes())))):
                 raise StateError("intake continuation requires its exact accounted unknown")
+    if ticket:
+        previous_receipt = json.loads(Path(state["calls"][-1]["receipt"]).read_bytes())
+        if previous_receipt.get("status") != ticket.get("prior_receipt_status", "result_unknown"):
+            raise StateError("intake continuation changed its predecessor terminal status")
+    if ticket and ticket.get("step_request"):
+        request = ticket["step_request"]
+        path = Path(request["proposal_path"]).resolve()
+        receipt_path = Path(state["calls"][-1]["receipt"]).resolve()
+        receipt = json.loads(receipt_path.read_bytes())
+        if (ticket.get("prior_receipt_status") != "completed" or receipt.get("status") != "completed"
+                or request.get("kind") != "literature_acquisition"
+                or path != receipt_path.parent / "outputs/response.json"
+                or sha(path.read_bytes()) != request["proposal_sha256"]):
+            raise StateError("literature step lost its exact completed proposal")
+        proposal = json.loads(path.read_bytes())["topic_selection"]
+        reconstructed = [{key: "".join(parts) for key,parts in row.items()}
+                         for row in request["candidate_literal_chunks"]]
+        if reconstructed != proposal["candidates"] or request["candidate_ids"] != [c["id"] for c in reconstructed]:
+            raise StateError("literature step changed its current candidates")
     if not Path(runtime_python).is_file():
         raise StateError("intake requires an installed Python runtime")
     assignment = json.loads((root / "inputs/assignment.json").read_bytes())
@@ -202,6 +228,15 @@ def run_once(root, runtime_python, *, recovery=None, continuation=None):
         "rule": "Request one declared source/runtime assessment tool, or submit a proposal/abstention. "
                 "The controller records one response and at most one tool observation, then stops. "
                 "Installation and scientific computation require a later frozen pilot; no repair model is called."}
+    literature = ticket.get("step_request") if continuation else None
+    if literature:
+        from scisaurus.runtime.literature_collection import literature_contract
+        assignment["literature_acquisition"] = literature
+        assignment["scientific_software_tools"]["actions"] = {"collect_literature": literature_contract()["arguments"]}
+        actions = assignment["scientific_software_tools"]["actions"]
+        assignment["scientific_software_tools"]["response"] = {"tool_action": literature_contract()}
+        assignment["scientific_software_tools"]["rules"] = [literature["rule"], "Stop on the first acquisition error; no retry or fallback."]
+        assignment["execution_step"] = {"mode":"one_literature_batch_then_stop", "rule":literature["rule"]}
     project = root / "composer"
     output = project / "output"
     directory = project / "intake-controller"
@@ -255,12 +290,17 @@ def run_once(root, runtime_python, *, recovery=None, continuation=None):
                     or lab.attestation["attestation_sha256"] != expected["attestation_identity"]):
                 raise StateError("laboratory changed during intake dispatch")
             workbench = SoftwareWorkbench(project / "scientific-software", deadline=deadline, laboratory=lab)
-            observation = workbench.execute(action)
+            if literature:
+                from scisaurus.runtime.literature_collection import collect_literature
+                observation = collect_literature(action, candidate_ids=literature["candidate_ids"],
+                    root=attempt.parent / (attempt.stem + ".literature"), deadline=deadline)
+            else:
+                observation = workbench.execute(action)
             record["observation"] = observation
             if observation.get("outcome") != "ok":
                 raise StateError("intake tool failed or is unknown; stop before another model call")
             record["status"] = "stopped_after_observation"
-        elif set(response) == {"topic_selection"}:
+        elif not literature and set(response) == {"topic_selection"}:
             validate_proposal(response["topic_selection"], assignment)
             record["status"] = "stopped_with_unreviewed_proposal"
         else:

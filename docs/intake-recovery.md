@@ -11,3 +11,11 @@ After external account-capacity confirmation, `run-prepared-research-turn.py --r
 The transport excludes historical replay from new usage and reasoning checks. Unexpected new reasoning output, a tool failure, provider failure, invalid response or lost execution permission stops the attempt. The original paid receipt remains immutable; unsettled computation remains unknown. Proposals require separate scientific admission and validation.
 
 Offline tests prove lifecycle, ownership, interruption recovery and request serialization. They do not establish that a remote model honors reasoning suppression or that a proposed scientific topic is valid; those require actual observations.
+
+## Literature continuation from a completed proposal
+
+`prepare-literature-step.py --root MISSION --receipt-sha256 SHA --attempt MARKER` binds the exact latest completed proposal, archived output digest and existing session. It preserves the original candidate strings as lossless literal chunks so long fields remain readable. Preparation leaves prior session receipts and their accounting unchanged.
+
+The primary returns one `collect_literature` action with one OpenAlex query per existing candidate. The controller validates every candidate and query before acquisition, performs the requests sequentially with zero retries and no anonymous fallback, and stops at the first failure. Raw provider captures and partial batch receipts remain available even when a later candidate fails. Repeated collection cannot dispatch again under the same attempt.
+
+The acquisition returns scholarly metadata, reconstructed abstracts and source locations. It does not acquire full text, select a new topic, evaluate novelty, or admit a scientific claim. The controller stops after this batch; reading results or further retrieval requires another explicit step.

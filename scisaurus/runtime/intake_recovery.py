@@ -153,3 +153,95 @@ def prepare_continuation(root, *, receipt_sha256, attempt_path=None):
         seal(ticket_path, raw)
         session.bind_recovered_backend(active, expected_state_sha256=sha(previous_raw), binding_ref=proof_path)
         return ticket_path
+
+
+def prepare_literature_step(root, *, receipt_sha256, attempt_path):
+    """Seal one literature acquisition from an exactly owned completed proposal."""
+    from scisaurus.runtime.development_session import _verify_receipt_files
+    from scisaurus.runtime.fresh_intake import validate_proposal
+    import time
+    root = Path(root).resolve()
+    project = root / 'composer'
+    pointer = json.loads((root / 'preparation.json').read_bytes())
+    checkpoint_raw = Path(pointer['checkpoint_path']).read_bytes()
+    if sha(checkpoint_raw) != pointer['checkpoint_sha256']:
+        raise StateError('literature step lost its immutable preparation')
+    checkpoint = json.loads(checkpoint_raw)
+    session = DevelopmentSession(checkpoint['development_session'])
+    if Path(session.binding['project_id']) != project:
+        raise StateError('literature step belongs to another project')
+    with control_lock(project / 'output'):
+        control_raw = (project / 'output/run-control.json').read_bytes()
+        if json.loads(control_raw).get('stop_requested') is not True:
+            raise StateError('literature step requires stopped execution')
+        marker = Path(attempt_path).resolve()
+        if not marker.is_relative_to(project / 'intake-controller'):
+            raise StateError('literature predecessor has a foreign owner')
+        marker_raw = marker.read_bytes()
+        record = json.loads(marker_raw)
+        sealed = project / 'intake-controller' / (sha(marker_raw) + '.json')
+        if sealed.read_bytes() != marker_raw or record.get('status') != 'stopped_with_unreviewed_proposal':
+            raise StateError('literature step requires its exact completed proposal marker')
+        binding_path = Path(record['backend_binding']).resolve()
+        if not binding_path.is_relative_to(project / 'intake-controller'):
+            raise StateError('literature backend has a foreign owner')
+        backend = validate_batch_config(json.loads(binding_path.read_bytes())['backend'])
+        verify_batch_runtime(backend)
+        with session.lease(backend, time.monotonic()+2):
+            state_raw = session.path.read_bytes()
+            state = session.state
+            if (not state['calls'] or state['calls'][-1]['sha256'] != receipt_sha256
+                    or state['calls'][-1]['receipt'] != record['receipt']
+                    or record['session_id'] != state['session_id']
+                    or record['preparation_sha256'] != sha(checkpoint_raw)):
+                raise StateError('literature step requires its exact latest primary receipt')
+            receipt_path = Path(record['receipt']).resolve()
+            receipt_raw = receipt_path.read_bytes()
+            receipt = json.loads(receipt_raw)
+            if (sha(receipt_raw) != receipt_sha256 or receipt.get('status') != 'completed'
+                    or record.get('usage') != receipt.get('usage')
+                    or not receipt_path.is_relative_to(project / 'intake-jobs')):
+                raise StateError('literature predecessor is not an owned completed result')
+            _verify_receipt_files(receipt_path, receipt)
+            proposal_path = receipt_path.parent / 'outputs/response.json'
+            proposal_raw = proposal_path.read_bytes()
+            proposal = json.loads(proposal_raw)
+            assignment = json.loads((receipt_path.parent / 'input/assignment.json').read_bytes())
+            if (set(proposal) != {'topic_selection'} or record.get('response') != proposal
+                    or receipt['outputs']['response.json'] != sha(proposal_raw)):
+                raise StateError('literature predecessor lost its exact proposal')
+            validate_proposal(proposal['topic_selection'], assignment)
+            if not proposal['topic_selection']['candidates']:
+                raise StateError('literature acquisition requires existing candidates')
+            # Long literal fields are split without adding, dropping or replacing characters.
+            candidates = [{key: [value[i:i+1000] for i in range(0,len(value),1000)]
+                           for key,value in c.items()} for c in proposal['topic_selection']['candidates']]
+            request = {'kind':'literature_acquisition', 'proposal_path':str(proposal_path),
+                'proposal_sha256':sha(proposal_raw), 'candidate_ids':[c['id'] for c in proposal['topic_selection']['candidates']],
+                'candidate_literal_chunks': candidates,
+                'rule':'Keep these candidates unchanged. Choose one targeted literature query per candidate '
+                       'to find closest prior work, theoretical counterexamples and conventional application baselines. '
+                       'Submit collect_literature only. All candidate fields are hypotheses, not established facts. '
+                       'Metadata and reconstructed abstracts are not acquired full text or novelty validation.'}
+            body = {'schema_version':'explicit-intake-continuation-1','session_id':state['session_id'],
+                'development_session':session.binding,'preparation_sha256':sha(checkpoint_raw),
+                'session_sha256':sha(state_raw),'control_sha256':sha(control_raw),
+                'receipt_sha256':receipt_sha256,'prior_receipt_status':'completed',
+                'backend':backend,'backend_binding':str(binding_path),
+                'backend_binding_sha256':sha(binding_path.read_bytes()),'step_request':request,
+                'feedback':{'prior_outcome':'completed unreviewed proposal; no scientific admission',
+                            'reported_usage':receipt['usage'],'step':'one literature acquisition batch then stop'}}
+            raw = canonical_bytes(body)
+            directory = project / 'intake-controller/recoveries' / receipt_sha256
+            directory.mkdir(parents=True,exist_ok=True)
+            path = directory / (sha(raw)+'.json')
+            if path.with_suffix('.attempt.json').exists():
+                raise StateError('literature step already consumed; no automatic retry')
+            if path.exists() and path.read_bytes()!=raw:
+                raise StateError('literature step ticket changed')
+            if not path.exists():
+                temporary=path.with_suffix('.tmp')
+                temporary.write_bytes(raw)
+                temporary.replace(path)
+            path.chmod(0o444)
+            return path
