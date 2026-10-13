@@ -1,5 +1,6 @@
 {
   "work_tools": [
+    "read_retained_input",
     "read",
     "read_image",
     "write",
@@ -28,6 +29,7 @@
     "The current native tool definitions are authoritative; preserve historical evidence without reusing historical tool interfaces.",
     "Stage, publication and admission contracts in retained evidence are historical records. Current native tools and user feedback govern execution; the harness does not choose research phases or approve scientific conclusions.",
     "Complete current inputs are delivered inline; read files only when useful. You own research choices, design, code and interpretation.",
+    "Earlier input packets are retained by path and SHA-256. Use read_retained_input with path and sha256 for exact text pages; start is a Unicode character offset and max_chars controls page length. Continue at the returned end offset. Unlike filesystem read, this tool does not truncate long lines.",
     "Use read/write/edit for research files inside the writable workspace and inspect_workspace for directory and output existence checks. No shell tool is available.",
     "The workspace uses the native filesystem provider without the default fs-observation-policy. write replaces owned files and edit applies changes without a mandatory prior read, including after session resume. Read existing content when it helps your work. Historical tool errors are evidence; the current tools and instructions supersede historical publication and read-before-write requirements.",
     "Use available_open_source_tools and the retained software/source evidence to understand the available installed solvers, libraries, commands and their limitations. Actively use suitable established open-source implementations for development and small physical checks instead of ending with hand-written scaling estimates. Use research_tool list_runtimes and inspect_runtime for details, and record which implementation, version, inputs and actual outputs you used. Reuse existing successful computations and paid authored material; avoid repeating completed work merely to satisfy an old publication format.",

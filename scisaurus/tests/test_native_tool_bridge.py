@@ -125,7 +125,7 @@ class RunArgumentTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get('SCISAURUS_DSH_CONFIG'),'explicit installed runtime configuration required')
 class InstalledRuntimeTests(unittest.TestCase):
-    def exercise(self,failure=False,run_program=False,review=False):
+    def exercise(self,failure=False,run_program=False,review=False,resume=False):
         requests=[]
         laboratory=None;runtime_label=None
         if run_program:
@@ -141,7 +141,13 @@ class InstalledRuntimeTests(unittest.TestCase):
                 def event(data):self.wfile.write(('data: '+json.dumps(data)+'\n\n').encode());self.wfile.flush()
                 event({'id':'offline-'+str(len(requests)),'model':body['model'],
                     'choices':[{'index':0,'delta':{'role':'assistant','content':None}}]})
-                if len(requests)==1:
+                if resume and len(requests)==4:
+                    text='\n'.join(message['content'] if isinstance(message.get('content'),str) else
+                        '\n'.join(block.get('text','') for block in (message.get('content') or []) if block.get('type')=='text')
+                        for message in body['messages'])
+                    refs=json.loads(text.split('<retained-inputs>\n')[1].split('\n</retained-inputs>')[0])
+                    name='read_retained_input';args={**refs['inputs']['assignment.json'],'start':0,'max_chars':32000}
+                elif len(requests)==1:
                     name='research_tool';args={'operation':'check_environment','arguments':{}}
                     if run_program:name='research_run';args={'runtime':runtime_label,
                         'source':'import json\nprint(json.dumps({"value": 2 + 2}))\n','input':{},
@@ -183,18 +189,42 @@ class InstalledRuntimeTests(unittest.TestCase):
                     rp=Path(records[-1]['receipt']);receipt=json.loads(rp.read_bytes())
                     self.assertNotIn('development_session',receipt);self.assertTrue(receipt['process_reaped'])
                     _verify_receipt_files(rp,receipt)
+                    manifest=json.loads(Path(receipt['task_contract']['path']).read_bytes())
+                    self.assertNotIn('retained_inputs',manifest)
                     names={t['function']['name'] for t in requests[0]['tools']}
                     self.assertIn('research_run',names);self.assertNotIn('write',names);self.assertNotIn('edit',names)
                     return
                 assignment=work_assignment({'objective':'Offline interface fixture'},{'kind':'research_work','checkpoint':{}})
+                if resume:assignment['historical_science']='ARCHIVED_SCIENCE_MARKER'+(' original evidence'*1000)
                 record={};bench=SoftwareWorkbench(root/'software',deadline=time.monotonic()+30,laboratory=laboratory)
                 execute=native_tool_handler(assignment,bench,record)
                 if failure:execute=Mock(side_effect=[ValidationError('offline controlled tool failure'),{'outcome':'ok','receipt_ref':'corrected-check'}])
+                from scisaurus.runtime.development_session import development_session_binding,DevelopmentSession
                 runner=DshBatchRunner(config,root=root/'jobs',runtime_read_roots=[str(Path(sys.executable).absolute().parent.parent)],
+                    development_session=development_session_binding(root) if resume else None,
                     required_startup_marker=GUARD_READY,forbid_reasoning=True)
                 runner.task_contract={**guarded_backend(config),'mode':'research_work','input_delivery':'inline','native_controller_tools':True}
                 runner.native_tool_handler=execute
                 result=runner.run(work_instructions(),inputs={'assignment.json':json.dumps(assignment)},outputs=['response.json'])
+                if resume:
+                    first=Path(result['receipt']);original=(first.parent/'input/assignment.json').read_bytes()
+                    current=work_assignment({'objective':'Current research','current_science':'CURRENT_FULL_INPUT_MARKER'},
+                        {'kind':'research_work','checkpoint':{}})
+                    second=runner.run(work_instructions(),inputs={'assignment.json':json.dumps(current)},outputs=['research-transcript.md'])
+                    receipt=json.loads(Path(second['receipt']).read_bytes());previous=json.loads(first.read_bytes())
+                    self.assertEqual(receipt['session_id'],previous['session_id']);self.assertEqual(len(requests),5)
+                    first_restored=json.dumps(requests[3]['messages'])
+                    self.assertIn('<retained-inputs>',first_restored)
+                    self.assertIn('CURRENT_FULL_INPUT_MARKER',first_restored)
+                    self.assertNotIn('ARCHIVED_SCIENCE_MARKER',first_restored)
+                    self.assertIn('ARCHIVED_SCIENCE_MARKER',json.dumps(requests[4]['messages']))
+                    self.assertEqual((first.parent/'input/assignment.json').read_bytes(),original)
+                    manifest=json.loads(Path(receipt['task_contract']['path']).read_bytes())
+                    self.assertEqual(len(manifest['retained_inputs']),1)
+                    self.assertEqual(manifest['retained_inputs'][0]['receipt_sha256'],sha256(first))
+                    with DevelopmentSession(development_session_binding(root)).lease(config,time.monotonic()+2) as owner:
+                        self.assertEqual(len(owner.state['calls']),2);owner.verify_history()
+                    return
                 self.assertEqual(len(requests),4 if failure else 3)
                 if failure:
                     self.assertEqual(execute.call_count,2)
@@ -217,6 +247,7 @@ class InstalledRuntimeTests(unittest.TestCase):
     def test_installed_native_controller_roundtrip(self):self.exercise()
     def test_requested_isolated_review_uses_native_tools_without_author_or_schema(self):self.exercise(review=True)
     def test_known_tool_error_is_feedback_and_same_session_corrects_it(self):self.exercise(failure=True)
+    def test_same_primary_restores_archives_and_reads_full_original_in_real_sandbox(self):self.exercise(resume=True)
     @unittest.skipUnless(os.environ.get('SCISAURUS_LAB_CONFIG') and os.environ.get('SCISAURUS_LAB_ATTESTATION'),
         'explicit attested laboratory configuration required')
     def test_native_computation_executes_in_attested_runtime(self):self.exercise(run_program=True)

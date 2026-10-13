@@ -16,21 +16,34 @@ export function nativeTools(mode) {
   return [...interfaceSpec[mode === 'research_work' ? 'work_tools' : 'intake_tools']];
 }
 
-export function projectSessionInputs(session, project) {
+export function projectSessionInputs(session, project, inspected = new Set(), currentMessages = new Set(), historicalNodes) {
+  const reads = new Set(session.events.filter(e => e.type === 'tool/call' && ['read', 'read_retained_input'].includes(e.data.name)).map(e => e.data.callId));
   for (const seq of [...session.surface.nodes]) {
+    if (historicalNodes && !historicalNodes.has(seq)) continue;
     const event = session.events[seq];
-    if (event.type !== 'user/message') continue;
+    if (event.type !== 'user/message' && event.type !== 'tool/result') continue;
+    if (inspected.has(seq)) continue;
+    if (event.type === 'user/message' && currentMessages.has(event.data.id)) { inspected.add(seq); continue; }
+    if (event.type === 'tool/result' && !reads.has(event.data.message.source.callId)) continue;
     let changed = false;
-    const content = event.data.content.map(block => {
-      if (block.type !== 'text' || !block.text.includes('<current-inputs>')) return block;
-      const text = project(block.text);
+    const message = event.type === 'user/message' ? event.data : event.data.message;
+    const projectBlock = (block, kind) => {
+      if (block.type !== 'text' || (kind === 'inputs' && !block.text.includes('<current-inputs>'))) return block;
+      const text = project(block.text, kind);
       if (text === block.text) return block;
       changed = true;
       return { ...block, text };
-    });
-    if (changed) session.append('user/message', { ...event.data, content }, {
+    };
+    const content = message.content.map(block => event.type === 'user/message' ? projectBlock(block, 'inputs') :
+      (block.type === 'tool-result' && !block.isError ? { ...block, content: block.content.map(b => projectBlock(b, 'read')) } : block));
+    if (changed) {
+      const data = event.type === 'user/message' ? { ...event.data, content } : { ...event.data, message: { ...message, content } };
+      const replacement = session.append(event.type, data, {
       surfaceOp: { op: 'replace', start: seq, end: seq }, sourceEventSeqs: [seq],
-    });
+      });
+      inspected.add(replacement.seq);
+    }
+    inspected.add(seq);
   }
 }
 
@@ -86,7 +99,7 @@ export function createPolicy(manifest, check) {
     }
     if (!nativeTools(manifest.mode).includes(exec.name))
       return 'Tool is outside the declared native interface: ' + exec.name;
-    if (['read', 'read_image', 'inspect_workspace'].includes(exec.name)) return;
+    if (['read', 'read_retained_input', 'read_image', 'inspect_workspace'].includes(exec.name)) return;
     if (['research_tool','research_run'].includes(exec.name) || exec.name === (manifest.mode==='research_work' ? 'review_response' : 'validate_response')) return;
     if (manifest.mode === 'research_work' && ['write', 'edit'].includes(exec.name)) {
       if (!ownedFile(exec.arguments.file_path)) return 'Research files must remain in the owning workspace';
@@ -134,12 +147,39 @@ export function apply(ctx, config) {
     agent.ctx.tools.restrict({ allow: nativeTools(manifest.mode) });
   });
   if (['research_work','research_review'].includes(manifest.mode)) {
-    ctx.on('agent/pre-step', async ({ agent }, next) => {
-      projectSessionInputs(agent.session, text => JSON.parse(execFileSync(config.python,
+    if (manifest.mode === 'research_work') ctx.tools.register({ name: 'read_retained_input',
+      description: 'Read exact Unicode text pages from a retained immutable input. No line truncation. Use the path and sha256 in the archive reference; continue at end until total_chars.',
+      parameters: { type: 'object', additionalProperties: false, required: ['path','sha256'], properties: {
+        path: {type:'string'}, sha256: {type:'string'}, start: {type:'integer',minimum:0}, max_chars: {type:'integer',minimum:1} } },
+      output: { schema: { type:'object', additionalProperties:true },
+        render: (_args, value) => [{type:'text',text:'<path>'+value.path+'</path>\n'+JSON.stringify(value)}] },
+      execute(args) {
+        const retained=(manifest.retained_inputs ?? []).flatMap(packet => Object.values(packet.inputs));
+        const item=retained.find(input => input.path === args.path && input.sha256 === args.sha256);
+        if (!item) throw new Error('Input is outside this primary\'s retained archive catalog');
+        const raw=readFileSync(item.path);
+        if (hash(raw) !== item.sha256) throw new Error('Retained input changed');
+        const points=Array.from(new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(raw));
+        const start=args.start ?? 0, length=args.max_chars ?? 32000;
+        if (!Number.isSafeInteger(start) || start < 0 || !Number.isSafeInteger(length) || length < 1)
+          throw new Error('Retained input offsets must be nonnegative integers and page length positive');
+        const end=Math.min(points.length,start+length);
+        if (start > points.length) throw new Error('Retained input offset exceeds its length');
+        return {path:item.path,sha256:item.sha256,start,end,total_chars:points.length,content:points.slice(start,end).join('')};
+      },
+    });
+    const inspected = new Set();
+    const currentMessages = new Set();
+    let historicalNodes;
+    ctx.on('agent/pre-step', async ({ agent, messages }, next) => {
+      historicalNodes ??= new Set(agent.session.surface.nodes);
+      for (const message of messages ?? []) currentMessages.add(message.id);
+      projectSessionInputs(agent.session, (text, kind) => JSON.parse(execFileSync(config.python,
         [config.checker, config.bundle], {
-          input: JSON.stringify({ project_research_inputs: text }), encoding: 'utf8',
+          input: JSON.stringify({ [kind === 'read' ? 'project_research_read' : 'project_research_inputs']: text,
+            retained_inputs: manifest.retained_inputs }), encoding: 'utf8',
           maxBuffer: Math.max(Buffer.byteLength(text) * 2, 1024 * 1024),
-        })).text);
+        })).text, inspected, currentMessages, historicalNodes);
       return next();
     });
     const assignment = JSON.parse(readFileSync(manifest.assignment, 'utf8'));

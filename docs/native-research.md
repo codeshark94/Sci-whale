@@ -44,6 +44,17 @@ review assignment, feedback and usage. Restored input messages use the same
 projection through append-only session surface replacements; original events and
 input archives remain intact. Scientific inputs and observations are not shortened.
 
+The current input packet stays inline. Earlier packets from the same primary's
+verified receipts become archive references with original paths and SHA-256 hashes.
+The primary can retrieve exact Unicode text pages with `read_retained_input`,
+including long JSON lines that filesystem `read` truncates. No model-generated or
+operator-written summary replaces them. Earlier input-file read results use the
+same references; assistant replies and other tool observations stay inline.
+The actual current message is identified by its transport ID, so identical older
+packets cannot masquerade as current input. Restoring a session appends surface replacements
+without rewriting its original events, receipts or usage. Isolated reviewers receive
+no primary archive catalog.
+
 ## Operational boundaries
 
 Explicit user stops, finite dispatch deadlines, provider failures and unknown

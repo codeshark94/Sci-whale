@@ -1,14 +1,13 @@
 """Same-primary work packets, actual observations and requested review feedback."""
 from copy import deepcopy
-import hashlib
 import json
 from pathlib import Path
-import re
 
 from scisaurus.core.errors import StateError,ValidationError
 from scisaurus.runtime.fresh_intake import sha
 from scisaurus.runtime.intake_recovery import stopped_step
 from scisaurus.runtime.software_workbench import tool_contract,validate_readonly_action
+from scisaurus.runtime.research_context import research_context_projection,project_inline_research_inputs
 
 
 def native_interface():
@@ -99,36 +98,6 @@ def work_request(context, feedback=None):
         'observation':deepcopy(context['record'].get('observation')),
         'observations':deepcopy([x for x in observations if x]),
         'review_feedback':deepcopy(context['record'].get('review_feedback'))}}
-
-
-def research_context_projection(assignment):
-    """Keep research evidence inline and transport custody in its sealed ledger."""
-    result=deepcopy(assignment)
-    checkpoint=result.get('research_work',{}).get('checkpoint',{})
-    for dispatch in checkpoint.get('review_dispatches',[]):
-        if 'backend' in dispatch:
-            from scisaurus.core.schema import canonical_bytes
-            backend=dispatch.pop('backend')
-            dispatch['backend_sha256']=hashlib.sha256(canonical_bytes(backend)).hexdigest()
-    return result
-
-
-def project_inline_research_inputs(text):
-    """Project archived input messages without changing their scientific contents."""
-    def project(match):
-        try:
-            files=json.loads(match.group(1))
-            assignment=json.loads(files['assignment.json'])
-        except (ValueError,KeyError,TypeError):
-            return match.group(0)
-        if not isinstance(assignment,dict) or not isinstance(assignment.get('research_work'),dict):
-            return match.group(0)
-        projected=research_context_projection(assignment)
-        if projected==assignment:return match.group(0)
-        from scisaurus.runtime.inline_inputs import inline_inputs
-        files['assignment.json']=json.dumps(projected,ensure_ascii=False)
-        return inline_inputs(files).strip('\n')
-    return re.sub(r'<current-inputs>\n(.*?)\n</current-inputs>',project,text,flags=re.DOTALL)
 
 
 def work_assignment(original,request):

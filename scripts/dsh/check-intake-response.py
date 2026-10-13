@@ -10,8 +10,14 @@ def main():
     from scisaurus.runtime.intake_contract import delivered_assignment, strict_document, validate_response
     value = json.load(sys.stdin)
     if 'project_research_inputs' in value:
-        from scisaurus.runtime.primary_work import project_inline_research_inputs
-        print(json.dumps({'text':project_inline_research_inputs(value['project_research_inputs'])}))
+        from scisaurus.runtime.research_context import project_inline_research_inputs
+        print(json.dumps({'text':project_inline_research_inputs(value['project_research_inputs'],
+            retained_inputs=value.get('retained_inputs',()))}))
+        return
+    if 'project_research_read' in value:
+        from scisaurus.runtime.research_context import project_archived_input_read
+        print(json.dumps({'text':project_archived_input_read(value['project_research_read'],
+            retained_inputs=value.get('retained_inputs',()))}))
         return
     raw = Path(value['assignment']).read_bytes()
     if hashlib.sha256(raw).hexdigest() != value['assignment_sha256']:

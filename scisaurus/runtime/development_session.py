@@ -585,6 +585,20 @@ class DevelopmentSession:
         return [str(Path(row["receipt"]).parent) for row in self.state["calls"]]
 
     @property
+    def retained_inputs(self):
+        """Expose only this primary's verified immutable input archives."""
+        from scisaurus.runtime.research_context import input_archive
+        self.verify_history()
+        packets=[]
+        for call in self.state['calls']:
+            path=Path(call['receipt']);receipt=json.loads(path.read_bytes())
+            boundaries=[('input',receipt.get('input_sha256',{})),
+                *((turn['input_directory'],turn['input_sha256']) for turn in receipt.get('turns',[]))]
+            packets.extend(input_archive(path.parent/directory,hashes,receipt_sha256=call['sha256'])
+                           for directory,hashes in boundaries if hashes)
+        return packets
+
+    @property
     def transport_history(self):
         return [json.loads(Path(row["receipt"]).read_bytes()) for row in self.state["calls"]]
 
