@@ -16,6 +16,24 @@ export function nativeTools(mode) {
   return [...interfaceSpec[mode === 'research_work' ? 'work_tools' : 'intake_tools']];
 }
 
+export function projectSessionInputs(session, project) {
+  for (const seq of [...session.surface.nodes]) {
+    const event = session.events[seq];
+    if (event.type !== 'user/message') continue;
+    let changed = false;
+    const content = event.data.content.map(block => {
+      if (block.type !== 'text' || !block.text.includes('<current-inputs>')) return block;
+      const text = project(block.text);
+      if (text === block.text) return block;
+      changed = true;
+      return { ...block, text };
+    });
+    if (changed) session.append('user/message', { ...event.data, content }, {
+      surfaceOp: { op: 'replace', start: seq, end: seq }, sourceEventSeqs: [seq],
+    });
+  }
+}
+
 export function createPolicy(manifest, check) {
   const inputs = new Map(Object.entries(manifest.inputs).map(([path, digest]) => {
     const raw = readFileSync(path);
@@ -116,6 +134,14 @@ export function apply(ctx, config) {
     agent.ctx.tools.restrict({ allow: nativeTools(manifest.mode) });
   });
   if (['research_work','research_review'].includes(manifest.mode)) {
+    ctx.on('agent/pre-step', async ({ agent }, next) => {
+      projectSessionInputs(agent.session, text => JSON.parse(execFileSync(config.python,
+        [config.checker, config.bundle], {
+          input: JSON.stringify({ project_research_inputs: text }), encoding: 'utf8',
+          maxBuffer: Math.max(Buffer.byteLength(text) * 2, 1024 * 1024),
+        })).text);
+      return next();
+    });
     const assignment = JSON.parse(readFileSync(manifest.assignment, 'utf8'));
     function registerController(name, parameters, actionFor, description) {
       ctx.tools.register({ name, description, parameters,

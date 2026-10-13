@@ -1,7 +1,9 @@
 """Same-primary work packets, actual observations and requested review feedback."""
 from copy import deepcopy
+import hashlib
 import json
 from pathlib import Path
+import re
 
 from scisaurus.core.errors import StateError,ValidationError
 from scisaurus.runtime.fresh_intake import sha
@@ -99,6 +101,36 @@ def work_request(context, feedback=None):
         'review_feedback':deepcopy(context['record'].get('review_feedback'))}}
 
 
+def research_context_projection(assignment):
+    """Keep research evidence inline and transport custody in its sealed ledger."""
+    result=deepcopy(assignment)
+    checkpoint=result.get('research_work',{}).get('checkpoint',{})
+    for dispatch in checkpoint.get('review_dispatches',[]):
+        if 'backend' in dispatch:
+            from scisaurus.core.schema import canonical_bytes
+            backend=dispatch.pop('backend')
+            dispatch['backend_sha256']=hashlib.sha256(canonical_bytes(backend)).hexdigest()
+    return result
+
+
+def project_inline_research_inputs(text):
+    """Project archived input messages without changing their scientific contents."""
+    def project(match):
+        try:
+            files=json.loads(match.group(1))
+            assignment=json.loads(files['assignment.json'])
+        except (ValueError,KeyError,TypeError):
+            return match.group(0)
+        if not isinstance(assignment,dict) or not isinstance(assignment.get('research_work'),dict):
+            return match.group(0)
+        projected=research_context_projection(assignment)
+        if projected==assignment:return match.group(0)
+        from scisaurus.runtime.inline_inputs import inline_inputs
+        files['assignment.json']=json.dumps(projected,ensure_ascii=False)
+        return inline_inputs(files).strip('\n')
+    return re.sub(r'<current-inputs>\n(.*?)\n</current-inputs>',project,text,flags=re.DOTALL)
+
+
 def work_assignment(original,request):
     tools=tool_contract();tools.pop('response')
     tools['native_arguments_schema']['run']['required']=['source']
@@ -108,9 +140,9 @@ def work_assignment(original,request):
     retired={'phase','output_contract','scientific_software_tools','execution_step','transport_feedback',
         'structured_output_policy','structured_continuation','concept_invention','invention_review',
         'invention_process','literature_acquisition'}
-    return {**{key:deepcopy(value) for key,value in original.items() if key not in retired},
+    return research_context_projection({**{key:deepcopy(value) for key,value in original.items() if key not in retired},
         'research_work':deepcopy(request),'scientific_software_tools':tools,
-        'native_tool_interface':deepcopy(native_interface())}
+        'native_tool_interface':deepcopy(native_interface())})
 
 
 def validate_native_action(assignment,action):

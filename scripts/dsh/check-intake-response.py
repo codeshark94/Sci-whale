@@ -9,6 +9,10 @@ def main():
     sys.path.insert(0, sys.argv[1])
     from scisaurus.runtime.intake_contract import delivered_assignment, strict_document, validate_response
     value = json.load(sys.stdin)
+    if 'project_research_inputs' in value:
+        from scisaurus.runtime.primary_work import project_inline_research_inputs
+        print(json.dumps({'text':project_inline_research_inputs(value['project_research_inputs'])}))
+        return
     raw = Path(value['assignment']).read_bytes()
     if hashlib.sha256(raw).hexdigest() != value['assignment_sha256']:
         raise ValueError('sealed assignment changed')

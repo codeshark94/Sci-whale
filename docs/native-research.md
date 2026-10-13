@@ -38,6 +38,12 @@ interruption preserves the original unknown outcome. `reconcile_review` records
 accounting recovery against the exact reaped receipt without inventing an answer.
 Reconciling the primary transport does not reconcile an interrupted reviewer.
 
+Review backend configurations and source-pin inventories remain in the sealed
+accounting ledger. Research context carries their hashes alongside the complete
+review assignment, feedback and usage. Restored input messages use the same
+projection through append-only session surface replacements; original events and
+input archives remain intact. Scientific inputs and observations are not shortened.
+
 ## Operational boundaries
 
 Explicit user stops, finite dispatch deadlines, provider failures and unknown

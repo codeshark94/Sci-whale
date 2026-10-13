@@ -1,6 +1,8 @@
 """Lean primary work preserves receipts and treats notes as unadmitted evidence."""
 from copy import deepcopy
 import json
+import shutil
+import subprocess
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -26,6 +28,92 @@ class PrimaryWorkTests(unittest.TestCase):
     def prepare(self):return prepare_work_step(self.owner.root,receipt_sha256=self.f.identity,
         attempt_path=self.f.marker,runtime_python=sys.executable)
     def preflight(self,ticket):return self.f.f.preflight(ticket)
+
+    def test_transport_custody_is_not_repeated_in_research_context(self):
+        from scisaurus.runtime.primary_work import research_context_projection,project_inline_research_inputs
+        dispatch={'status':'completed','receipt':'owned-review/receipt.json','usage':{'model_calls':6},
+            'assignment':{'geometry':{'L':1,'t':.001},'raw':['NaN',0,3]},
+            'feedback':{'notes':'The coefficients differ.'},'backend':{'pinned_files':{'path':'abc'},'model':'fixed'}}
+        request={'kind':'research_work','feedback':'Correct the same-condition comparison.',
+            'checkpoint':{'review_dispatches':[dispatch],'observations':[{'raw':[1,2]}]}}
+        original={'objective':'mechanical fold','research_work':request}
+        saved=deepcopy(original);projected=research_context_projection(original)
+        self.assertEqual(original,saved)
+        reviewed=projected['research_work']['checkpoint']['review_dispatches'][0]
+        self.assertNotIn('backend',reviewed)
+        self.assertEqual(reviewed['backend_sha256'],sha(canonical_bytes(dispatch['backend'])))
+        for key in dispatch.keys()-{'backend'}:self.assertEqual(reviewed[key],dispatch[key])
+        self.assertEqual(research_context_projection(projected),projected)
+        files={'assignment.json':json.dumps(original),'task.txt':'Use the installed solver.'}
+        text='prefix'+inline_inputs(files)+'suffix'
+        actual=project_inline_research_inputs(text)
+        self.assertTrue(actual.startswith('prefix\n<current-inputs>'))
+        self.assertTrue(actual.endswith('</current-inputs>\nsuffix'))
+        packet=json.loads(actual.split('<current-inputs>\n')[1].split('\n</current-inputs>')[0])
+        self.assertEqual(json.loads(packet['assignment.json']),projected)
+        self.assertEqual(packet['task.txt'],files['task.txt'])
+        self.assertEqual(project_inline_research_inputs(actual),actual)
+        self.assertEqual(project_inline_research_inputs('arbitrary research prose'),'arbitrary research prose')
+
+    def test_assignment_projection_keeps_original_review_accounting(self):
+        dispatch={'backend':{'pinned_files':{'custody':'abc'}},'assignment':{'raw':[3]},
+            'status':'completed','receipt':'owned','feedback':'unresolved'}
+        request={'kind':'research_work','checkpoint':{'review_dispatches':[dispatch]}}
+        assignment=work_assignment({},request)
+        self.assertEqual(request['checkpoint']['review_dispatches'],[dispatch])
+        self.assertEqual(assignment['research_work']['checkpoint']['review_dispatches'][0]['assignment'],{'raw':[3]})
+        self.assertNotIn('backend',assignment['research_work']['checkpoint']['review_dispatches'][0])
+
+    def test_installed_session_projection_is_append_only_and_replays(self):
+        session_module=Path('/Users/seungyeop/workspace/dsh/packages/core/session/lib/index.js')
+        if not session_module.is_file():self.skipTest('installed DSH session runtime unavailable')
+        source_root=Path(__file__).resolve().parents[2]
+        code=r'''
+import assert from 'node:assert/strict';
+import {mkdtempSync,writeFileSync,rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';import {join} from 'node:path';
+import {createHash} from 'node:crypto';
+const {Session,SessionId}=await import(SESSION_MODULE);
+const {apply}=await import(PLUGIN);
+const root=mkdtempSync(join(tmpdir(),'research-context-'));
+const assignment={research_work:{kind:'research_work',checkpoint:{review_dispatches:[]}},
+ scientific_software_tools:{actions:{check_environment:{}},native_arguments_schema:{run:{type:'object',properties:{source:{type:'string'}},required:['source']}}}};
+const prior={research_work:{kind:'research_work',feedback:'Same-condition comparison',checkpoint:{
+ review_dispatches:[{backend:{pinned_files:{custody:'hash'}},assignment:{raw:[3,4]},feedback:'unresolved',usage:{model_calls:6}}]}}};
+const text='prefix\n<current-inputs>\n'+JSON.stringify({'assignment.json':JSON.stringify(prior),'task.txt':'science'})+'\n</current-inputs>\nsuffix';
+const s=Session.create(SessionId('offline'));
+s.append('user/message',{id:'original',role:'user',source:{kind:'user'},content:[{type:'text',text}]},{surfaceOp:'append'});
+const original=JSON.stringify(s.events),count=s.events.length;
+const input=join(root,'assignment.json');writeFileSync(input,JSON.stringify(assignment));
+const manifest=join(root,'manifest.json');writeFileSync(manifest,JSON.stringify({mode:'research_work',input_delivery:'inline',workspace:root,output:join(root,'response.json'),assignment:input,inputs:{[input]:createHash('sha256').update(JSON.stringify(assignment)).digest('hex')}}));
+process.env.SCISAURUS_TASK_CONTRACT=manifest;
+const hooks=new Map();
+try {
+ apply({tools:{guard(){},register(){}},on(name,fn){hooks.set(name,fn)}},
+  {python:PYTHON,checker:CHECKER,bundle:BUNDLE});
+ let forwarded=0;
+ await hooks.get('agent/pre-step')({agent:{session:s}},async()=>{forwarded++;return {kind:'enter'}});
+ assert.equal(forwarded,1);assert.equal(JSON.stringify(s.events.slice(0,count)),original);
+ const projected=s.deriveMessages()[0].content[0].text;
+ const packet=JSON.parse(projected.split('<current-inputs>\n')[1].split('\n</current-inputs>')[0]);
+ const body=JSON.parse(packet['assignment.json']),dispatch=body.research_work.checkpoint.review_dispatches[0];
+ assert.equal(dispatch.backend,undefined);assert.match(dispatch.backend_sha256,/^[a-f0-9]{64}$/);
+ assert.deepEqual(dispatch.assignment,{raw:[3,4]});assert.equal(dispatch.feedback,'unresolved');assert.deepEqual(dispatch.usage,{model_calls:6});
+ assert.equal(packet['task.txt'],'science');assert.equal(body.research_work.feedback,prior.research_work.feedback);
+ assert.deepEqual(s.events.at(-1).sourceEventSeqs,[0]);
+ const length=s.events.length;
+ await hooks.get('agent/pre-step')({agent:{session:s}},async()=>({kind:'enter'}));
+ assert.equal(s.events.length,length);
+ const restored=Session.create(SessionId('offline'),[...s.events]);assert.deepEqual(restored.deriveMessages(),s.deriveMessages());
+} finally {rmSync(root,{recursive:true,force:true});}
+'''
+        for key,value in {'SESSION_MODULE':session_module.as_uri(),
+                'PLUGIN':(source_root/'scripts/dsh/intake-contract.mjs').as_uri(),
+                'PYTHON':sys.executable,'CHECKER':str(source_root/'scripts/dsh/check-intake-response.py'),
+                'BUNDLE':str(source_root)}.items():code=code.replace(key,json.dumps(value))
+        result=subprocess.run([shutil.which('node') or '/Users/seungyeop/.hermes/node/bin/node',
+            '--input-type=module','-e',code],capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr)
 
     def test_work_packet_has_no_stage_schema_or_other_author_and_preserves_history(self):
         ticket=self.prepare();t=json.loads(ticket.read_bytes());state=json.loads(self.owner.session.path.read_bytes())
