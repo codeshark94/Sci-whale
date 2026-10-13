@@ -32,11 +32,6 @@ def guard_backend(backend, directory, runtime_python, *, work_mode=False, review
     sources = {'checker.zip': buffer.getvalue(),
         **{name:(source_root/'scripts/dsh'/name).read_bytes() for name in
            ('intake-contract.mjs','check-intake-response.py','stop-on-tool-error.mjs','research-tools.json')}}
-    identity = sha(canonical_bytes({**{name:sha(raw) for name,raw in sources.items()},
-        **({'mode':'primary-review' if review_mode else 'primary-work'} if work_mode or review_mode else {})}))
-    policy = Path(directory)/identity
-    policy.mkdir(parents=True,exist_ok=True)
-    for name,raw in sources.items():sealed_file(policy/name,raw)
     composition=json.loads(Path(backend['composition']).read_bytes())
     composition=[item for item in composition if item.get('id') not in {'intake-contract','stop-on-tool-error'}]
     for item in composition:
@@ -49,9 +44,16 @@ def guard_backend(backend, directory, runtime_python, *, work_mode=False, review
         for item in composition:
             if 'persona' in item.get('config',{}):
                 item['config']['persona']=('Independent read-only reviewer. Reply with evidence-grounded feedback; no research authorship or producer workspace.' if review_mode else work_instructions())
+    python = str(Path(runtime_python).absolute())
+    identity = sha(canonical_bytes({**{name:sha(raw) for name,raw in sources.items()},
+        'composition':composition,'python':python,'python_sha256':sha(Path(python).read_bytes()),
+        **({'mode':'primary-review' if review_mode else 'primary-work'} if work_mode or review_mode else {})}))
+    policy = Path(directory)/identity
+    policy.mkdir(parents=True,exist_ok=True)
+    for name,raw in sources.items():sealed_file(policy/name,raw)
     if not (work_mode or review_mode):
         composition.append({'id':'stop-on-tool-error','name':str((policy/'stop-on-tool-error.mjs').resolve())})
-    config={'python':str(Path(runtime_python).absolute()),'checker':str((policy/'check-intake-response.py').resolve()),
+    config={'python':python,'checker':str((policy/'check-intake-response.py').resolve()),
             'bundle':str((policy/'checker.zip').resolve())}
     if work_mode or review_mode:config['mode']='research_review' if review_mode else 'research_work'
     composition.append({'id':'intake-contract','name':str((policy/'intake-contract.mjs').resolve()),'config':config})

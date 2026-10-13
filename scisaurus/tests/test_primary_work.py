@@ -372,6 +372,34 @@ class InlineTransportTests(unittest.TestCase):
         finally:fixture.tearDown()
 
 class NativeWorkPolicyTests(unittest.TestCase):
+    def test_policy_identity_preserves_distinct_python_environment_paths(self):
+        import tempfile
+        from scisaurus.runtime.intake_guard import guard_backend,guarded_backend
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);source=root/'composition.json';source.write_text('[]')
+            backend={'composition':str(source),'read_roots':[],'pinned_files':{}}
+            alias=root/'venv-python';alias.symlink_to(sys.executable)
+            original=guard_backend(backend,root/'policies',sys.executable,work_mode=True)
+            alternate=guard_backend(backend,root/'policies',alias,work_mode=True)
+            self.assertNotEqual(original['composition'],alternate['composition'])
+            self.assertEqual(guarded_backend(alternate)['python'],str(alias.absolute()))
+            self.assertEqual(guard_backend(alternate,root/'policies',alias,work_mode=True),alternate)
+            self.assertEqual(guard_backend(backend,root/'policies',sys.executable,work_mode=True),original)
+
+    def test_policy_identity_includes_effective_composition(self):
+        import tempfile
+        from scisaurus.runtime.intake_guard import guard_backend
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);source=root/'composition.json'
+            source.write_text(json.dumps([{'id':'provider','name':'provider','config':{'model':'first'}}]))
+            backend={'composition':str(source),'read_roots':[],'pinned_files':{}}
+            first=guard_backend(backend,root/'policies',sys.executable,work_mode=True)
+            retained=Path(first['composition']).read_bytes()
+            source.write_text(json.dumps([{'id':'provider','name':'provider','config':{'model':'second'}}]))
+            second=guard_backend(backend,root/'policies',sys.executable,work_mode=True)
+            self.assertNotEqual(first['composition'],second['composition'])
+            self.assertEqual(Path(first['composition']).read_bytes(),retained)
+
     def test_work_composition_keeps_native_provider_without_ephemeral_observation_gate(self):
         import tempfile
         from scisaurus.runtime.intake_guard import guard_backend
