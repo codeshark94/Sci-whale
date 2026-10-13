@@ -334,6 +334,7 @@ class DshBatchRunner:
                     manifest.update(input_delivery='inline',mode=self.task_contract['mode'])
                     if self.task_contract['mode']=='research_work' and development is not None:
                         manifest['retained_inputs']=development.retained_inputs
+                        manifest['retained_tool_results']=development.retained_tool_results
                 if self.native_tool_handler is not None:
                     from scisaurus.runtime.native_tool_bridge import NativeToolBridge
                     native_bridge = NativeToolBridge(job, state, self.native_tool_handler, save, deadline)

@@ -77,6 +77,24 @@ class DevelopmentSessionTests(unittest.TestCase):
         self.assertEqual(a["usage"]["model_calls"], 1)
         self.assertEqual((Path(first["receipt"]).parent / "outputs/answer.txt").read_bytes(), b'1')
 
+    def test_native_archive_requires_exact_receipt_call_and_primary_owner(self):
+        from scisaurus.core.schema import canonical_bytes
+        result=self.dispatch();path=Path(result['receipt']);receipt=json.loads(path.read_bytes())
+        directory=path.parent/'native-tool-results';directory.mkdir()
+        reply={'callId':'call','sessionId':receipt['session_id'],'observation':{'outcome':'failed','usage':{'model_calls':1}}}
+        response=directory/'reply.json';response.write_bytes(canonical_bytes(reply))
+        receipt['native_tool_calls']=[{'status':'responded','call_id':'call','response_file':'reply.json','response_sha256':sha256(response)}]
+        def settle_fixture():
+            path.write_bytes(canonical_bytes(receipt));session=DevelopmentSession(self.binding)
+            session.state=json.loads(session.path.read_bytes());session.state['calls'][0]['sha256']=sha256(path);session.save()
+            return session
+        session=settle_fixture();record=session.retained_tool_results[0]
+        self.assertEqual(record['call_id'],'call');self.assertEqual(Path(record['path']).read_bytes(),canonical_bytes(reply))
+        for field,value in [('callId','wrong'),('sessionId','foreign')]:
+            changed={**reply,field:value};response.write_bytes(canonical_bytes(changed))
+            receipt['native_tool_calls'][0]['response_sha256']=sha256(response);session=settle_fixture()
+            with self.assertRaisesRegex(ValidationError,'primary owner'):_=session.retained_tool_results
+
     def test_changed_backend_and_receipt_fail_closed(self):
         first = self.dispatch()
         changed = dict(self.config, model="another-model")

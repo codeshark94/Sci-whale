@@ -16,26 +16,45 @@ export function nativeTools(mode) {
   return [...interfaceSpec[mode === 'research_work' ? 'work_tools' : 'intake_tools']];
 }
 
+export function projectNativeToolResult(text, callId, records = []) {
+  for (const item of [...records].reverse()) {
+    if (item.call_id !== callId) continue;
+    const raw = readFileSync(item.path);
+    if (hash(raw) !== item.sha256) throw new Error('Retained tool result changed');
+    const reply = JSON.parse(raw);
+    if (reply.callId !== callId) throw new Error('Retained tool result lost its call owner');
+    const value = reply.observation ?? {outcome:'failed',error:reply.error};
+    if (JSON.stringify(value) !== text) continue;
+    return '<retained-tool-result>\n'+JSON.stringify({path:item.path,sha256:item.sha256,
+      receipt_sha256:item.receipt_sha256,call_id:callId,outcome:value.outcome,
+      retrieval:'Use read_retained_input with path and sha256 for the complete original reply.'})+
+      '\n</retained-tool-result>';
+  }
+  return text;
+}
+
 export function projectSessionInputs(session, project, inspected = new Set(), currentMessages = new Set(), historicalNodes) {
   const reads = new Set(session.events.filter(e => e.type === 'tool/call' && ['read', 'read_retained_input'].includes(e.data.name)).map(e => e.data.callId));
+  const native = new Set(session.events.filter(e => e.type === 'tool/call' && ['research_tool','research_run'].includes(e.data.name)).map(e => e.data.callId));
   for (const seq of [...session.surface.nodes]) {
     if (historicalNodes && !historicalNodes.has(seq)) continue;
     const event = session.events[seq];
     if (event.type !== 'user/message' && event.type !== 'tool/result') continue;
     if (inspected.has(seq)) continue;
     if (event.type === 'user/message' && currentMessages.has(event.data.id)) { inspected.add(seq); continue; }
-    if (event.type === 'tool/result' && !reads.has(event.data.message.source.callId)) continue;
+    const callId = event.type === 'tool/result' ? event.data.message.source.callId : undefined;
+    if (event.type === 'tool/result' && !reads.has(callId) && !native.has(callId)) continue;
     let changed = false;
     const message = event.type === 'user/message' ? event.data : event.data.message;
     const projectBlock = (block, kind) => {
       if (block.type !== 'text' || (kind === 'inputs' && !block.text.includes('<current-inputs>'))) return block;
-      const text = project(block.text, kind);
+      const text = project(block.text, kind, callId);
       if (text === block.text) return block;
       changed = true;
       return { ...block, text };
     };
     const content = message.content.map(block => event.type === 'user/message' ? projectBlock(block, 'inputs') :
-      (block.type === 'tool-result' && !block.isError ? { ...block, content: block.content.map(b => projectBlock(b, 'read')) } : block));
+      (block.type === 'tool-result' && !block.isError ? { ...block, content: block.content.map(b => projectBlock(b, reads.has(callId) ? 'read' : 'tool')) } : block));
     if (changed) {
       const data = event.type === 'user/message' ? { ...event.data, content } : { ...event.data, message: { ...message, content } };
       const replacement = session.append(event.type, data, {
@@ -148,13 +167,14 @@ export function apply(ctx, config) {
   });
   if (['research_work','research_review'].includes(manifest.mode)) {
     if (manifest.mode === 'research_work') ctx.tools.register({ name: 'read_retained_input',
-      description: 'Read exact Unicode text pages from a retained immutable input. No line truncation. Use the path and sha256 in the archive reference; continue at end until total_chars.',
+      description: 'Read exact Unicode text pages from a retained immutable input or native reply. No line truncation. Use the path and sha256 in the archive reference; continue at end until total_chars.',
       parameters: { type: 'object', additionalProperties: false, required: ['path','sha256'], properties: {
         path: {type:'string'}, sha256: {type:'string'}, start: {type:'integer',minimum:0}, max_chars: {type:'integer',minimum:1} } },
       output: { schema: { type:'object', additionalProperties:true },
         render: (_args, value) => [{type:'text',text:'<path>'+value.path+'</path>\n'+JSON.stringify(value)}] },
       execute(args) {
-        const retained=(manifest.retained_inputs ?? []).flatMap(packet => Object.values(packet.inputs));
+        const retained=[...(manifest.retained_inputs ?? []).flatMap(packet => Object.values(packet.inputs)),
+          ...(manifest.retained_tool_results ?? [])];
         const item=retained.find(input => input.path === args.path && input.sha256 === args.sha256);
         if (!item) throw new Error('Input is outside this primary\'s retained archive catalog');
         const raw=readFileSync(item.path);
@@ -174,7 +194,8 @@ export function apply(ctx, config) {
     ctx.on('agent/pre-step', async ({ agent, messages }, next) => {
       historicalNodes ??= new Set(agent.session.surface.nodes);
       for (const message of messages ?? []) currentMessages.add(message.id);
-      projectSessionInputs(agent.session, (text, kind) => JSON.parse(execFileSync(config.python,
+      projectSessionInputs(agent.session, (text, kind, callId) => kind === 'tool' ?
+        projectNativeToolResult(text,callId,manifest.retained_tool_results) : JSON.parse(execFileSync(config.python,
         [config.checker, config.bundle], {
           input: JSON.stringify({ [kind === 'read' ? 'project_research_read' : 'project_research_inputs']: text,
             retained_inputs: manifest.retained_inputs }), encoding: 'utf8',

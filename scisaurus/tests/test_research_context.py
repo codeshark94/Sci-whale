@@ -89,6 +89,60 @@ class ResearchContextTests(unittest.TestCase):
         for text in ('ordinary numerical stdout','<path>/unregistered/solver.py</path>'):
             self.assertEqual(project_archived_input_read(text,retained_inputs=[self.packet]),text)
 
+    def tool_reply(self):
+        value={'outcome':'failed','source':'original 🧪 source','raw':['failure',0,None]}
+        reply={'callId':'owned-call','sessionId':'owned-primary','observation':value}
+        raw=canonical_bytes(reply);path=self.root/'native-reply.json';path.write_bytes(raw)
+        record={'path':str(path),'sha256':hashlib.sha256(raw).hexdigest(),'call_id':'owned-call',
+            'receipt_sha256':'e'*64,'session_id':'owned-primary'}
+        return value,record
+
+    def test_installed_surface_archives_only_prior_owned_native_result(self):
+        module=Path('/Users/seungyeop/workspace/dsh/packages/core/session/lib/index.js')
+        if not module.is_file():self.skipTest('installed DSH session unavailable')
+        value,item=self.tool_reply();root=Path(__file__).resolve().parents[2]
+        code=r'''
+import assert from 'node:assert/strict';import {readFileSync} from 'node:fs';
+const {Session,SessionId}=await import(MODULE);const {projectSessionInputs,projectNativeToolResult}=await import(PLUGIN);
+const s=Session.create(SessionId('owned-context')),item=ITEM,value=JSON.parse(readFileSync(item.path,'utf8')).observation;
+const call=id=>({turn:1,step:1,callId:id,name:'research_run',arguments:'{"source":"retained"}'});
+const result=id=>({turn:1,step:1,message:{id:id+'-result',role:'user',source:{kind:'tool',callId:id},content:[{type:'tool-result',toolCallId:id,isError:false,content:[{type:'text',text:JSON.stringify(value)}]}]}});
+s.append('tool/call',call('owned-call'));s.append('tool/result',result('owned-call'),{surfaceOp:'append'});
+const historical=new Set(s.surface.nodes),prefix=s.events.length,original=JSON.stringify(s.events),inspected=new Set();
+s.append('tool/call',call('fresh'));s.append('tool/result',result('fresh'),{surfaceOp:'append'});
+const project=(text,kind,id)=>projectNativeToolResult(text,id,[item]);
+projectSessionInputs(s,project,inspected,new Set(),historical);
+assert.equal(JSON.stringify(s.events.slice(0,prefix)),original);
+assert.match(s.deriveMessages()[0].content[0].content[0].text,/<retained-tool-result>/);
+assert.deepEqual(s.deriveMessages()[1],result('fresh').message);
+const n=s.events.length;projectSessionInputs(s,()=>{throw Error('duplicate projection')},inspected,new Set(),historical);assert.equal(s.events.length,n);
+const restored=Session.create(SessionId('owned-context'),[...s.events]);assert.deepEqual(restored.deriveMessages(),s.deriveMessages());
+'''
+        for key,val in {'MODULE':module.as_uri(),'PLUGIN':(root/'scripts/dsh/intake-contract.mjs').as_uri(),
+                'VALUE':value,'ITEM':item,'PYTHON':sys.executable,'CHECKER':str(root/'scripts/dsh/check-intake-response.py'),'BUNDLE':str(root)}.items():code=code.replace(key,json.dumps(val))
+        result=subprocess.run([shutil.which('node') or '/Users/seungyeop/.hermes/node/bin/node','--input-type=module','-e',code],capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+
+    def test_native_archive_matches_actual_javascript_number_rendering(self):
+        root=Path(__file__).resolve().parents[2]
+        code=r'''
+import assert from 'node:assert/strict';import {writeFileSync,readFileSync} from 'node:fs';import {createHash} from 'node:crypto';
+const {projectNativeToolResult}=await import(PLUGIN);const path=ROOT+'/reply.json';
+const raw='{"callId":"numeric","observation":{"outcome":"failed","raw":[1.0,1e-07,-0.0,9007199254740993],"text":"🧪 original"}}';
+writeFileSync(path,raw);const item={path,sha256:createHash('sha256').update(raw).digest('hex'),call_id:'numeric',receipt_sha256:'receipt'};
+const value=JSON.parse(raw).observation,text=JSON.stringify(value);
+assert.notEqual(text,raw);const result=projectNativeToolResult(text,'numeric',[item]);assert.match(result,/<retained-tool-result>/);
+assert.equal(readFileSync(path,'utf8'),raw);assert.match(result,/"outcome":"failed"/);
+assert.equal(projectNativeToolResult(text,'foreign',[item]),text);
+assert.equal(projectNativeToolResult(JSON.stringify({...value,text:'changed'}),'numeric',[item]),JSON.stringify({...value,text:'changed'}));
+writeFileSync(path,'{}');assert.throws(()=>projectNativeToolResult(text,'numeric',[item]),/changed/);
+const other=raw.replace('"numeric"','"wrong"');writeFileSync(path,other);const forged={...item,sha256:createHash('sha256').update(other).digest('hex')};
+assert.throws(()=>projectNativeToolResult(text,'numeric',[forged]),/call owner/);
+'''
+        for key,value in {'PLUGIN':(root/'scripts/dsh/intake-contract.mjs').as_uri(),'ROOT':str(self.root)}.items():code=code.replace(key,json.dumps(value))
+        result=subprocess.run([shutil.which('node') or '/Users/seungyeop/.hermes/node/bin/node','--input-type=module','-e',code],capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+
     def test_installed_surface_keeps_current_event_even_with_identical_content(self):
         module=Path('/Users/seungyeop/workspace/dsh/packages/core/session/lib/index.js')
         if not module.is_file():self.skipTest('installed DSH session unavailable')

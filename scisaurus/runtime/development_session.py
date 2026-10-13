@@ -599,6 +599,25 @@ class DevelopmentSession:
         return packets
 
     @property
+    def retained_tool_results(self):
+        """Expose exact native replies from this primary's settled receipt prefix."""
+        self.verify_history()
+        records=[]
+        for call in self.state['calls']:
+            path=Path(call['receipt']);receipt=json.loads(path.read_bytes())
+            for native in receipt.get('native_tool_calls',[]):
+                if native.get('status')!='responded':continue
+                result=path.parent/'native-tool-results'/native['response_file']
+                raw=result.read_bytes();reply=json.loads(raw)
+                if (hashlib.sha256(raw).hexdigest()!=native['response_sha256']
+                        or reply.get('sessionId')!=self.state['session_id']
+                        or reply.get('callId')!=native['call_id']):
+                    raise ValidationError('retained native reply lost its primary owner')
+                records.append({'path':str(result.resolve()),'sha256':native['response_sha256'],
+                    'call_id':reply['callId'],'receipt_sha256':call['sha256']})
+        return records
+
+    @property
     def transport_history(self):
         return [json.loads(Path(row["receipt"]).read_bytes()) for row in self.state["calls"]]
 
