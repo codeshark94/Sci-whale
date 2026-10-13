@@ -10,6 +10,7 @@ import sys
 repository = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repository))
 from scisaurus.runtime.dsh_batch import validate_batch_config
+from scisaurus.runtime.dsh_context import context_entries
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--dsh-root", required=True)
@@ -52,6 +53,7 @@ composition = [
         "toolBash": {"enableRunInBackground": False}, "toolJobs": False}},
     {"id": "sessions", "name": "@deepseek-ai/dsh-session-persistence-jsonl", "config": {"root": ".sessions"}},
     {"id": "checkpoints", "name": "@deepseek-ai/dsh-session-checkpoint-policy"},
+    *context_entries(args.max_output_tokens),
     *([{"id": "attachments", "name": "@deepseek-ai/dsh-attachment-local"}] if args.vision else []),
     {"id": "fs", "name": "@deepseek-ai/dsh-fs-local"},
     {"id": "fs-policy", "name": "@deepseek-ai/dsh-fs-observation-policy"},
@@ -73,8 +75,12 @@ for entry_config in composition:
     if path is None or not path.is_file():
         parser.error(f"DSH plugin is not built: {entry_config['name']}")
     entry_config["name"] = str(path)
+context_path = output.with_suffix('.context.mjs')
+context_path.write_bytes((repository / 'scripts/dsh/context-policy.mjs').read_bytes())
+composition.append({'id': 'context-policy', 'name': str(context_path),
+                    'config': {'maxOutputTokens': args.max_output_tokens}})
 composition_path.write_text(json.dumps(composition, indent=2) + "\n")
-files = {node, entry, composition_path, root / "package.json", root / "pnpm-lock.yaml"}
+files = {node, entry, composition_path, context_path, root / "package.json", root / "pnpm-lock.yaml"}
 files.update((root / "packages").glob("*/**/lib/**/*.js"))
 files.update((root / "packages").glob("*/**/package.json"))
 files.update((root / "vendor").rglob("*.js"))

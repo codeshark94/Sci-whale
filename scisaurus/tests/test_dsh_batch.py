@@ -103,6 +103,39 @@ class BatchTests(unittest.TestCase):
         self.assertTrue(receipt["process_reaped"])
         self.assertEqual(receipt["status"], "completed")
 
+    def test_compaction_stream_and_summary_usage_are_counted_once(self):
+        extra = """
+  event('compaction/start',{'turn':1,'compactionId':'summary-1'})
+  event('scisaurus/compaction-call',{'turn':1,'step':1,'compactionId':'summary-1','phase':'start'})
+  event('scisaurus/compaction-call',{'turn':1,'step':1,'compactionId':'summary-1','phase':'chunk','chunk':{'type':'usage','usage':{'inputTokens':30,'outputTokens':9,'cacheReadTokens':40}}})
+  event('scisaurus/compaction-call',{'turn':1,'step':1,'compactionId':'summary-1','phase':'chunk','chunk':{'type':'usage','usage':{'inputTokens':30,'outputTokens':9,'cacheReadTokens':40}}})
+  event('compaction/summary',{'compactionId':'summary-1','llmStreamCall':True,'usage':{'inputTokens':30,'outputTokens':9,'cacheReadTokens':40}})
+  event('compaction/summary',{'compactionId':'unowned-old','llmStreamCall':True,'usage':{'inputTokens':900,'outputTokens':900}})
+  event('compaction/prune',{'shadowedTokenCount':900})
+"""
+        self.script.write_text(FAKE.replace("  if mode=='wait':", extra + "  if mode=='wait':"))
+        result = self.run_job(self.config())
+        self.assertEqual(result['usage'], {'model_calls': 2, 'input_tokens': 51,
+                                         'output_tokens': 17, 'cache_read_tokens': 40})
+
+    def test_failed_compaction_preserves_partial_usage_and_quota_without_next_request(self):
+        extra = """
+  event('scisaurus/compaction-call',{'turn':1,'step':1,'compactionId':'partial','phase':'start'})
+  event('scisaurus/compaction-call',{'turn':1,'step':1,'compactionId':'partial','phase':'chunk','chunk':{'type':'usage','usage':{'inputTokens':31,'outputTokens':4}}})
+  event('scisaurus/compaction-call',{'turn':1,'step':1,'compactionId':'partial','phase':'chunk','chunk':{'type':'finish','reason':{'kind':'error','failure':{'code':'RATE_LIMIT','message':'HTTP 429 weekly usage limit'}}}})
+  event('turn/end',{'turn':1,'reason':{'kind':'error','error':{'code':'UNKNOWN','message':'summary failed'}}})
+  emit({'jsonrpc':'2.0','method':'session.status','params':{'sessionId':session,'status':'idle'}})
+  continue
+"""
+        self.script.write_text(FAKE.replace("  if mode=='wait':", extra + "  if mode=='wait':"))
+        with self.assertRaises(DshBatchError) as caught:
+            self.run_job(self.config())
+        self.assertEqual(caught.exception.usage, {'model_calls': 1, 'input_tokens': 31, 'output_tokens': 4})
+        self.assertEqual(caught.exception.provider_failure['provider_error_kind'], 'quota_exhausted')
+        receipt=json.loads(Path(caught.exception.receipt).read_bytes())
+        self.assertEqual(receipt['status'], 'result_unknown')
+        self.assertTrue(receipt['process_reaped'])
+
     def test_primary_transcript_is_recorded_without_model_authored_files_or_format(self):
         text=FAKE.replace("'message':{'id':'m1','source':{'kind':'model'}}",
             "'message':{'id':'m1','source':{'kind':'model'},'content':[{'type':'text','text':'# Work notes\\nUnfinished sketch { no JSON contract.'}]}" )

@@ -386,6 +386,7 @@ class DshBatchRunner:
         buffers = {"stdout": bytearray()}
         calls_seen = set()
         step_usage = {}
+        compaction_owners = {}
         def send(identity, method, params):
             ensure_run_allowed()
             if time.monotonic() >= deadline:
@@ -405,17 +406,39 @@ class DshBatchRunner:
             if resume_pending or identity[1] in completed_turns:
                 return
             chunk = data.get("chunk", {})
-            if (self.forbid_reasoning and event.get("type") == "assistant/chunk"
+            kind = event.get("type")
+            if kind == 'compaction/start':
+                compaction_owners[data.get('compactionId')] = data.get('turn')
+                return
+            if kind == 'scisaurus/compaction-call':
+                identity = (params['sessionId'], 'compaction', data['compactionId'])
+                if chunk.get('type') == 'finish':
+                    reason = chunk.get('reason', {})
+                    failure = dsh_provider_failure({'kind': 'error', 'error': reason.get('failure')})
+                    if failure is not None:
+                        state['provider_failure'] = failure
+                if data.get('phase') == 'start':
+                    if identity not in calls_seen:
+                        calls_seen.add(identity)
+                        state['usage']['model_calls'] += 1
+                    return
+            if (self.forbid_reasoning and kind in {'assistant/chunk', 'scisaurus/compaction-call'}
                     and chunk.get("type") == "reasoning-delta" and chunk.get("text")):
                 raise RuntimeError("provider violated explicit reasoning-off request; no redispatch permitted")
-            if event.get("type") == "step/start":
+            if kind == "step/start":
                 if identity not in calls_seen:
                     calls_seen.add(identity)
                     state["usage"]["model_calls"] += 1
                 return
-            if event.get("type") == "assistant/chunk" and data.get("chunk", {}).get("type") == "usage":
+            if kind in {'assistant/chunk', 'scisaurus/compaction-call'} and chunk.get("type") == "usage":
                 usage = data["chunk"].get("usage", {})
-            elif event.get("type") == "assistant/message":
+            elif kind == 'compaction/summary' and data.get('llmStreamCall') is True:
+                identity = (params['sessionId'], 'compaction', data['compactionId'])
+                if (compaction_owners.get(data.get('compactionId')) in completed_turns
+                        or data['compactionId'] not in compaction_owners and identity not in calls_seen):
+                    return
+                usage = data.get('usage', {})
+            elif kind == "assistant/message":
                 usage = data.get("usage", {})
             else:
                 return
@@ -424,7 +447,8 @@ class DshBatchRunner:
                 state["usage"]["model_calls"] += 1
             prior = step_usage.setdefault(identity, {})
             for source, target in (("inputTokens", "input_tokens"), ("outputTokens", "output_tokens"),
-                                   ("cacheReadTokens", "cache_read_tokens"), ("reasoningTokens", "reasoning_tokens")):
+                                   ("cacheReadTokens", "cache_read_tokens"), ("cacheWriteTokens", "cache_write_tokens"),
+                                   ("reasoningTokens", "reasoning_tokens")):
                 number = usage.get(source)
                 if type(number) is int and number >= 0:
                     previous = prior.get(target, 0)

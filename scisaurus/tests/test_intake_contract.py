@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from scisaurus.tests.context_fixtures import context_backend
 from scisaurus.core.errors import StateError, ValidationError
 from scisaurus.core.schema import canonical_bytes
 from scisaurus.runtime.fresh_intake import sha
@@ -184,7 +185,7 @@ try{apply({tools:{guard(){},register(definition){assertSupportedJsonSchema(defin
             root=Path(directory);noop=root/'noop.mjs';noop.write_text('export function apply() {}')
             composition=root/'composition.json';composition.write_text(json.dumps([
                 {'id':'stop-on-tool-error','name':str(noop)}]))
-            backend={'composition':str(composition),'read_roots':[],'pinned_files':{}}
+            backend=context_backend(root,{'composition':str(composition),'read_roots':[],'pinned_files':{}})
             active=guard_backend(backend,root/'sealed',sys.executable);guarded_backend(active)
             stopper=next(x for x in json.loads(Path(active['composition']).read_bytes()) if x['id']=='stop-on-tool-error')
             self.assertNotEqual(stopper['name'],str(noop));self.assertIn(stopper['name'],active['pinned_files'])

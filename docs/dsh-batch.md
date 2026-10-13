@@ -42,7 +42,8 @@ A work order has exactly `task` (text), `inputs` (relative filenames to text),
 Omit `--check` to execute it. The controller stores the JSON-RPC event stream,
 stderr, source/input/output hashes, token usage and terminal receipt beside a
 disposable writable workspace. `model_calls` counts started model steps, including
-pre-dispatch preparation failures; it is not a billing or HTTP-request count.
+pre-dispatch preparation failures, plus individually marked compaction streams;
+it is not a billing or HTTP-request count.
 No GUI is required. Multiple work orders can be
 submitted sequentially by an external batch queue. Standalone batches start
 fresh; managed development assignments use the project history described below.
@@ -64,6 +65,30 @@ never receive the development handle. Scientific reviews remain independent.
 An interrupted dispatch preserves its unknown outcome and blocks automatic
 continuation; explicit reconciliation must establish its settled ownership before
 the history can advance. No stage transition refunds or recounts earlier usage.
+
+### Automatic context maintenance
+
+Prepared deployments and source-pinned continuation compositions include the
+SDK token meter, tool-result pruner and basic compaction engine. A pre-step policy
+includes incoming input after context projection and triggers at the smaller
+of 80% of routed capacity or capacity minus generation reservation. It invokes
+the SDK's bounded chunk compactor proactively, before any research call, until
+the request fits its input/output reservation. Indivisible oversized input stops locally
+without a provider call. This changes the replayable conversation surface; original append-only
+events, scientific artifacts, hashes and development-session identity remain.
+
+Summary generation uses the current provider/model and the configured output
+capacity. Every provider request reserves that output space against measured
+input pressure. Summary streams retain their complete chunks and usage under
+the owning compaction identity, including partial failed calls. Stream usage
+and the completed summary record are reconciled once rather than double counted.
+
+The deployment invokes the native engine directly instead of its warning-only
+automatic handler. Summary failures propagate before another research request.
+Provider retries, compaction retries and context-overflow redispatch are disabled;
+an owned failed or unknown dispatch retains its original accounting and requires
+the existing explicit reconciliation process. A composition change alone does
+not prove live compaction or scientific completion.
 
 ## Production responsibilities
 

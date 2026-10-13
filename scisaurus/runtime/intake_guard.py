@@ -8,6 +8,7 @@ import zipfile
 from scisaurus.core.errors import StateError
 from scisaurus.core.schema import canonical_bytes
 from scisaurus.runtime.fresh_intake import sha
+from scisaurus.runtime.dsh_context import context_composition, context_entries
 
 GUARD_READY = 'SCISAURUS_NATIVE_RESEARCH_READY:tools-feedback-checkpoints-1'
 
@@ -31,8 +32,10 @@ def guard_backend(backend, directory, runtime_python, *, work_mode=False, review
                     date_time=(1980,1,1,0,0,0)), path.read_bytes())
     sources = {'checker.zip': buffer.getvalue(),
         **{name:(source_root/'scripts/dsh'/name).read_bytes() for name in
-           ('intake-contract.mjs','check-intake-response.py','stop-on-tool-error.mjs','research-tools.json')}}
+           ('intake-contract.mjs','check-intake-response.py','stop-on-tool-error.mjs','research-tools.json',
+            'context-policy.mjs')}}
     composition=json.loads(Path(backend['composition']).read_bytes())
+    composition=context_composition(backend,composition)
     composition=[item for item in composition if item.get('id') not in {'intake-contract','stop-on-tool-error'}]
     for item in composition:
         if 'toolBash' in item.get('config', {}) or 'persona' in item.get('config', {}):
@@ -57,6 +60,8 @@ def guard_backend(backend, directory, runtime_python, *, work_mode=False, review
             'bundle':str((policy/'checker.zip').resolve())}
     if work_mode or review_mode:config['mode']='research_review' if review_mode else 'research_work'
     composition.append({'id':'intake-contract','name':str((policy/'intake-contract.mjs').resolve()),'config':config})
+    composition.append({'id':'context-policy','name':str((policy/'context-policy.mjs').resolve()),
+                        'config':{'maxOutputTokens':backend['max_output_tokens']}})
     sealed_file(policy/'composition.json',canonical_bytes(composition))
     active=deepcopy(backend);active['composition']=str((policy/'composition.json').resolve())
     if str(policy.resolve()) not in active['read_roots']:
@@ -89,6 +94,21 @@ def guarded_backend(backend):
     if (backend['pinned_files'].get(str(interface))!=sha(interface.read_bytes())
             or interface.read_bytes()!=(source_root/'research-tools.json').read_bytes()):
         raise StateError('native tool interface differs from its authoritative source')
+    contexts=[x for x in composition if x.get('id')=='context-policy']
+    if (len(contexts)!=1 or contexts[0].get('config')!={'maxOutputTokens':backend['max_output_tokens']}):
+        raise StateError('native context policy differs from its generation reservation')
+    path=Path(contexts[0]['name'])
+    if (backend['pinned_files'].get(str(path))!=sha(path.read_bytes())
+            or path.read_bytes()!=(source_root/'context-policy.mjs').read_bytes()):
+        raise StateError('native context policy differs from its authoritative source')
+    expected=context_entries(backend['max_output_tokens'])
+    for item in expected:
+        actual=[x for x in composition if x.get('id')==item['id']]
+        if len(actual)!=1 or actual[0].get('config')!=item.get('config'):
+            raise StateError('native context service configuration changed: '+item['id'])
+        path=Path(actual[0]['name'])
+        if backend['pinned_files'].get(str(path))!=sha(path.read_bytes()):
+            raise StateError('native context service lost its source pin')
     return config
 
 

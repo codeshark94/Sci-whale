@@ -10,6 +10,7 @@ import time
 import unittest
 from unittest.mock import patch
 
+from scisaurus.tests.context_fixtures import context_backend
 from scisaurus.core.errors import StateError, ValidationError
 from scisaurus.core.events import ControlStore
 from scisaurus.core.schema import canonical_bytes
@@ -31,7 +32,7 @@ class IntakeAccountingTests(unittest.TestCase):
         self.project.mkdir(parents=True)
         self.binding = development_session_binding(self.project)
         self.session = DevelopmentSession(self.binding)
-        self.config = {"provider": "fixed", "model": "fixed"}
+        self.config = context_backend(self.project, {"provider": "fixed", "model": "fixed"})
         self.job = self.project / 'intake-jobs/job'
         (self.job / 'input').mkdir(parents=True)
         (self.job / 'input/assignment.json').write_bytes(b'{"question":null}')
@@ -176,6 +177,7 @@ class ExplicitPreparationTests(IntakeAccountingTests):
             'api':'openai-completions','reasoning':'off','models':[{'id':'fixed',
             'reasoningEfforts':{'off':None,'high':'high'}}]}}}}]))
         self.config.update(composition=str(composition), read_roots=[], pinned_files={})
+        context_backend(self.project, self.config)
         self.body['config_sha256']=digest(canonical_bytes(self.config))
         self.receipt.write_bytes(canonical_bytes(self.body)); self.sha=digest(self.receipt.read_bytes())
         self.session.state['config_sha256']=self.body['config_sha256'];self.session.save()

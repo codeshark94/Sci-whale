@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock,patch
 
+from scisaurus.tests.context_fixtures import context_backend
 from scisaurus.core.errors import StateError,ValidationError
 from scisaurus.core.schema import canonical_bytes
 from scisaurus.runtime.fresh_intake import IntakePrimaryClient,run_once,sha
@@ -377,7 +378,7 @@ class NativeWorkPolicyTests(unittest.TestCase):
         from scisaurus.runtime.intake_guard import guard_backend,guarded_backend
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);source=root/'composition.json';source.write_text('[]')
-            backend={'composition':str(source),'read_roots':[],'pinned_files':{}}
+            backend=context_backend(root,{'composition':str(source),'read_roots':[],'pinned_files':{}})
             alias=root/'venv-python';alias.symlink_to(sys.executable)
             original=guard_backend(backend,root/'policies',sys.executable,work_mode=True)
             alternate=guard_backend(backend,root/'policies',alias,work_mode=True)
@@ -392,7 +393,7 @@ class NativeWorkPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);source=root/'composition.json'
             source.write_text(json.dumps([{'id':'provider','name':'provider','config':{'model':'first'}}]))
-            backend={'composition':str(source),'read_roots':[],'pinned_files':{}}
+            backend=context_backend(root,{'composition':str(source),'read_roots':[],'pinned_files':{}})
             first=guard_backend(backend,root/'policies',sys.executable,work_mode=True)
             retained=Path(first['composition']).read_bytes()
             source.write_text(json.dumps([{'id':'provider','name':'provider','config':{'model':'second'}}]))
@@ -408,7 +409,7 @@ class NativeWorkPolicyTests(unittest.TestCase):
             fs={'id':'native-fs','name':'/installed/dsh/packages/fs/fs-local/lib/index.js'}
             policy={'id':'arbitrary-policy-alias','name':'/installed/dsh/packages/fs/fs-observation-policy/lib/index.js'}
             source.write_text(json.dumps([fs,policy]))
-            backend={'composition':str(source),'read_roots':[],'pinned_files':{}}
+            backend=context_backend(root,{'composition':str(source),'read_roots':[],'pinned_files':{}})
             work=guard_backend(backend,root/'work',sys.executable,work_mode=True)
             actual=json.loads(Path(work['composition']).read_bytes())
             self.assertIn(fs,actual);self.assertNotIn(policy,actual)
@@ -489,7 +490,7 @@ try{
             from scisaurus.runtime.program_sandbox import SANDBOX_EXEC,sandbox_profile
             root=Path(directory).resolve();work=root/'work';work.mkdir();temporary=root/'tmp';temporary.mkdir()
             composition=root/'composition.json';composition.write_text('[]')
-            backend=guard_backend({'composition':str(composition),'read_roots':[],'pinned_files':{}},
+            backend=guard_backend(context_backend(root,{'composition':str(composition),'read_roots':[],'pinned_files':{}}),
                 root/'sealed',sys.executable,work_mode=True)
             from scisaurus.runtime.software_workbench import run_arguments_schema
             code=code.replace('CHECKER_CONFIG',json.dumps(guarded_backend(backend))).replace('WORKSPACE',json.dumps(str(work))).replace('RUN_SCHEMA',json.dumps(run_arguments_schema()))
