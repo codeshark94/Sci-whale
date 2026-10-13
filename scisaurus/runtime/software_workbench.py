@@ -121,7 +121,8 @@ def tool_contract():
             "search": {"query": "repository search derived from the question or cited software", "page": 1},
             "inspect": {"repository": "owner/name", "revision": "optional explicit upstream branch, tag or commit; omitted uses the upstream default branch"},
             "read": {"inspection_ref": "software:sha256:...", "path": "repository-relative documentation or code path"},
-            "list_files": {"inspection_ref": "software:sha256:...", "directory": "repository-relative directory"},
+            "list_files": {"inspection_ref": "software:sha256:...", "directory": "repository-relative directory",
+                           "start": 0, "max_files": 100},
             "acquire": {"inspection_ref": "software:sha256:...", "runtime": "python | r | native",
                         "license_ref": "software:sha256:...", "requirements": ["exact Python distribution==version"], "dependencies": [], "package_path": ".",
                         "build": {"system": "cmake | make | configure", "options": [], "executable": "install/bin/engine"}},
@@ -165,6 +166,7 @@ def tool_contract():
 READONLY_OPTIONAL_FIELDS = {
     'read_receipt': {'start','max_chars'}, 'read_evidence': {'start','max_chars'},
     'fetch_source': {'start','max_chars','capture_ref'}, 'search': {'page'}, 'inspect': {'revision'},
+    'list_files': {'start','max_files'},
 }
 
 
@@ -181,7 +183,7 @@ def validate_readonly_action(action):
         example=prototype[name]
         if isinstance(example,str) and (not isinstance(value,str) or not value.strip()):
             raise ValidationError('software action requires nonempty '+name)
-        if type(example) is int and (type(value) is not int or value<0 or name in {'page','max_chars'} and value==0):
+        if type(example) is int and (type(value) is not int or value<0 or name in {'page','max_chars','max_files'} and value==0):
             raise ValidationError('software action requires a valid integer '+name)
         if isinstance(example,list) and (not isinstance(value,list) or not value
                 or any(not isinstance(x,str) or not x.strip() for x in value)):
@@ -239,20 +241,40 @@ def selected_receipt_closure(results, refs):
     return ordered
 
 
+def file_listing_page(files, args):
+    """Present a navigable page from a complete pinned directory inventory."""
+    start, limit = args.get('start', 0), args.get('max_files', 100)
+    if type(start) is not int or start < 0 or type(limit) is not int or limit < 1:
+        raise ValidationError('file listing requires a nonnegative start and positive max_files')
+    if start > len(files):
+        raise ValidationError('file listing start exceeds the pinned directory inventory')
+    end = min(start + limit, len(files))
+    return {'files': files[start:end], 'file_count': len(files),
+            'file_index_sha256': _sha(canonical_bytes(files)), 'start': start, 'end': end,
+            'next_start': end if end < len(files) else None,
+            'file_listing_scope': 'directory page; use list_files with next_start for subsequent entries'}
+
+
 def project_receipt(receipt):
     """Expose scientific evidence without repeating dependency file inventories."""
     projected = deepcopy(receipt)
     result = projected.get("result")
     if receipt.get("outcome") != "ok" or not isinstance(result, dict):
         return projected
-    if receipt["action"]["operation"] == "acquire":
+    operation = receipt.get("action", {}).get("operation")
+    if operation == "acquire" and 'files' in result:
         result["files_sha256"] = _sha(canonical_bytes(result.pop("files")))
         result["file_inventory_scope"] = "full inventory retained in the content-addressed acquisition receipt"
-    if receipt["action"]["operation"] == "inspect":
+    if operation == "inspect" and 'file_listing_scope' not in result:
         files = result.pop("files")
+        roots = [row for row in files if "/" not in row["path"]]
+        result.update(file_listing_page(roots, {}))
         result["file_index_sha256"] = _sha(canonical_bytes(files))
-        result["files"] = [row for row in files if "/" not in row["path"]]
+        result["file_count"] = len(files)
+        result["root_entry_count"] = len(roots)
         result["file_listing_scope"] = "repository root; use list_files for a source subdirectory"
+    if operation == 'list_files' and 'file_listing_scope' not in result:
+        result.update(file_listing_page(result.pop('files'), receipt['action'].get('arguments', {})))
     return projected
 
 
@@ -1061,12 +1083,13 @@ class SoftwareWorkbench:
                           for row in tree["tree"]], "tree_complete": tree.get("truncated") is not True}
 
     def _list_files(self, args, _key):
-        _fields(args, {"inspection_ref", "directory"})
+        _fields(args, {"inspection_ref", "directory"}, {'start','max_files'})
         inspected = self._receipt(args["inspection_ref"], "inspect")["result"]
         directory = _relative(args["directory"])
         return {"inspection_ref": args["inspection_ref"], "directory": directory,
                 "tree_complete": inspected["tree_complete"],
-                "files": [row for row in inspected["files"] if str(PurePosixPath(row["path"]).parent) == directory]}
+                **file_listing_page([row for row in inspected["files"]
+                                     if str(PurePosixPath(row["path"]).parent) == directory], args)}
 
     def _read(self, args, _key):
         _fields(args, {"inspection_ref", "path"})

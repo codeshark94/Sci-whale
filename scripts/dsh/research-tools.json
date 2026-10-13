@@ -23,7 +23,7 @@
     "research_tool",
     "research_run"
   ],
-  "controller_description": "Execute one declared discovery/inspection controller operation and return its actual receipt-bound observation. Use check_environment, list_runtimes or inspect_runtime for runtime discovery. Use the separate research_run tool for source-code computation. Arguments are specified in assignment.json scientific_software_tools.actions. This executes tools only; it does not create another author or establish scientific validity.",
+  "controller_description": "Execute one declared discovery/inspection controller operation and return its actual receipt-bound observation. Repository inspect displays root entries and the complete index hash/count; use list_files with inspection_ref and a directory to navigate the retained pinned tree, and read for a specific source file. list_files returns a directory page; follow next_start with optional start/max_files to read more entries without repeating repository inspection. Full repository and dependency inventories remain in the sealed receipt. Use check_environment, list_runtimes or inspect_runtime for runtime discovery. Use the separate research_run tool for source-code computation. Arguments are specified in assignment.json scientific_software_tools.actions. This executes tools only; it does not create another author or establish scientific validity.",
   "work_instructions": [
     "Continue the same research session. You choose the research steps, tool use, corrections, interpretation and checkpoint notes within the user's objective and constraints.",
     "The current native tool definitions are authoritative; preserve historical evidence without reusing historical tool interfaces.",

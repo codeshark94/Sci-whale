@@ -13,11 +13,12 @@ from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from unittest.mock import Mock,patch
 
 from scisaurus.core.errors import ValidationError
+from scisaurus.core.schema import canonical_bytes
 from scisaurus.runtime.native_tool_bridge import NativeToolBridge,METHOD
 from scisaurus.runtime.dsh_batch import DshBatchRunner,DshBatchError,sha256
 from scisaurus.runtime.intake_guard import guard_backend,guarded_backend,GUARD_READY
 from scisaurus.runtime.primary_work import work_assignment,native_tool_handler,work_instructions
-from scisaurus.runtime.software_workbench import SoftwareWorkbench
+from scisaurus.runtime.software_workbench import SoftwareWorkbench,project_receipt,validate_readonly_action
 from scisaurus.runtime.development_session import _verify_receipt_files
 from scisaurus.runtime.software_workbench import run_arguments_schema,validate_run_arguments
 
@@ -43,6 +44,67 @@ class BridgeTests(unittest.TestCase):
         receipt={'native_tool_calls':self.state['native_tool_calls']};rp=self.root/'receipt.json'
         _verify_receipt_files(rp,receipt);path.chmod(0o644);path.write_text('{}')
         with self.assertRaises(ValidationError):_verify_receipt_files(rp,receipt)
+
+    def test_current_inventory_view_keeps_the_complete_immutable_observation(self):
+        self.action={'operation':'inspect','arguments':{'repository':'owner/solver'}}
+        files=[{'path':'README.md','type':'blob','sha':'a'*40,'size':12},
+               *({'path':f'src/module/{i}.F90','type':'blob','sha':'b'*40,'size':100}
+                 for i in range(15000))]
+        original={'outcome':'ok','action':deepcopy(self.action),'receipt_ref':'software:sha256:'+'c'*64,
+                  'result':{'repository':'owner/solver','commit':'d'*40,'files':files,'tree_complete':True}}
+        self.handler.return_value=deepcopy(original)
+        self.bridge.respond(self.request())
+        record=self.state['native_tool_calls'][0];raw=(self.bridge.directory/record['response_file']).read_bytes()
+        reply=json.loads(raw)
+        self.assertEqual(reply['observation'],original)
+        view=reply['model_observation'];self.assertEqual(view['receipt_ref'],original['receipt_ref'])
+        self.assertEqual(view['result']['files'],files[:1]);self.assertEqual(view['result']['file_count'],len(files))
+        self.assertEqual(view['result']['file_index_sha256'],hashlib.sha256(
+            canonical_bytes(files)).hexdigest())
+        self.assertEqual(self.handler.return_value,original)
+        self.assertEqual(record['response_sha256'],hashlib.sha256(raw).hexdigest())
+        self.assertFalse(self.bridge.failed)
+
+    def test_dependency_inventory_view_preserves_raw_and_scientific_run_is_unmodified(self):
+        for operation in ('acquire','run'):
+            with self.subTest(operation=operation):
+                self.action={'operation':operation,'arguments':{}}
+                original={'outcome':'ok','action':deepcopy(self.action),
+                    'result':{'files':[{'path':'library/package.dat','sha256':'e'*64}],
+                              'source':'physical program','input':{'units':'N/m'},'raw':[1,2]}}
+                self.handler.return_value=deepcopy(original)
+                request=self.request();request['params']['callId']=operation
+                self.bridge.calls[operation]=self.bridge.calls.pop('call')
+                self.bridge.respond(request)
+                reply=json.loads((self.bridge.directory/self.state['native_tool_calls'][-1]['response_file']).read_bytes())
+                self.assertEqual(reply['observation'],original)
+                if operation=='run':self.assertNotIn('model_observation',reply)
+                else:
+                    self.assertNotIn('files',reply['model_observation']['result'])
+                    self.assertEqual(reply['model_observation']['result']['raw'],[1,2])
+
+    def test_pinned_directory_pages_and_legacy_views_preserve_every_entry(self):
+        files=[{'path':f'src/{i}.F90','type':'blob'} for i in range(205)]
+        inspection={'outcome':'ok','action':{'operation':'inspect','arguments':{}},'result':{'files':files,'tree_complete':True}}
+        root=self.root/'workbench';bench=SoftwareWorkbench(root,deadline=time.monotonic()+30)
+        raw=canonical_bytes(inspection);ref='software:sha256:'+hashlib.sha256(raw).hexdigest()
+        path=root/'receipts'/(ref.split(':')[-1]+'.json');path.parent.mkdir();path.write_bytes(raw)
+        combined=[];start=0
+        while True:
+            args={'inspection_ref':ref,'directory':'src','start':start}
+            validate_readonly_action({'operation':'list_files','arguments':args})
+            page=bench._list_files(args,'offline');combined.extend(page['files'])
+            self.assertEqual(page['file_count'],205)
+            if page['next_start'] is None:break
+            start=page['next_start']
+        self.assertEqual(combined,files);self.assertEqual(path.read_bytes(),raw)
+        legacy={'outcome':'ok','action':{'operation':'list_files','arguments':{'inspection_ref':ref,'directory':'src'}},
+                'result':{'files':files,'tree_complete':True}}
+        view=project_receipt(legacy)
+        self.assertEqual(len(view['result']['files']),100);self.assertEqual(view['result']['next_start'],100)
+        self.assertEqual(legacy['result']['files'],files)
+        with self.assertRaises(ValidationError):bench._list_files({'inspection_ref':ref,'directory':'src','max_files':0},'offline')
+        with self.assertRaises(ValidationError):validate_readonly_action({'operation':'list_files','arguments':{'inspection_ref':ref,'directory':'src','max_files':False}})
     def test_foreign_or_altered_requests_fail_before_the_handler(self):
         request=self.request();request['params']['sessionId']='foreign'
         with self.assertRaises(ValidationError):self.bridge.respond(request)
@@ -125,7 +187,7 @@ class RunArgumentTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get('SCISAURUS_DSH_CONFIG'),'explicit installed runtime configuration required')
 class InstalledRuntimeTests(unittest.TestCase):
-    def exercise(self,failure=False,run_program=False,review=False,resume=False):
+    def exercise(self,failure=False,run_program=False,review=False,resume=False,inspection=False):
         requests=[]
         laboratory=None;runtime_label=None
         if run_program:
@@ -149,6 +211,7 @@ class InstalledRuntimeTests(unittest.TestCase):
                     name='read_retained_input';args={**refs['inputs']['assignment.json'],'start':0,'max_chars':32000}
                 elif len(requests)==1:
                     name='research_tool';args={'operation':'check_environment','arguments':{}}
+                    if inspection:args={'operation':'inspect','arguments':{'repository':'owner/solver'}}
                     if run_program:name='research_run';args={'runtime':runtime_label,
                         'source':'import json\nprint(json.dumps({"value": 2 + 2}))\n','input':{},
                         'purpose':'scientific_computation','expected':None}
@@ -198,6 +261,11 @@ class InstalledRuntimeTests(unittest.TestCase):
                 if resume:assignment['historical_science']='ARCHIVED_SCIENCE_MARKER'+(' original evidence'*1000)
                 record={};bench=SoftwareWorkbench(root/'software',deadline=time.monotonic()+30,laboratory=laboratory)
                 execute=native_tool_handler(assignment,bench,record)
+                if inspection:
+                    tree=[{'path':'README.md','type':'blob'},
+                          *({'path':f'src/module/{i}.F90','type':'blob'} for i in range(15000))]
+                    execute=Mock(return_value={'outcome':'ok','action':{'operation':'inspect','arguments':{'repository':'owner/solver'}},
+                        'receipt_ref':'software:sha256:'+'c'*64,'result':{'files':tree,'tree_complete':True}})
                 if failure:execute=Mock(side_effect=[ValidationError('offline controlled tool failure'),{'outcome':'ok','receipt_ref':'corrected-check'}])
                 from scisaurus.runtime.development_session import development_session_binding,DevelopmentSession
                 runner=DshBatchRunner(config,root=root/'jobs',runtime_read_roots=[str(Path(sys.executable).absolute().parent.parent)],
@@ -230,7 +298,7 @@ class InstalledRuntimeTests(unittest.TestCase):
                     self.assertEqual(execute.call_count,2)
                     self.assertIn('offline controlled tool failure',json.dumps(requests[1]['messages']))
                     self.assertIn('corrected-check',json.dumps(requests[2]['messages']))
-                else:
+                elif not inspection:
                     self.assertTrue(record['observations'])
                     self.assertEqual(record['observations'][0]['outcome'],'ok')
                 self.assertEqual(json.loads(result['files']['response.json'])['note'],'Unadmitted local tool checkpoint')
@@ -238,6 +306,14 @@ class InstalledRuntimeTests(unittest.TestCase):
                     self.assertEqual(record['observations'][0]['result']['output'],{'value':4})
                 rp=Path(result['receipt']);receipt=json.loads(rp.read_bytes());self.assertTrue(receipt['process_reaped']);self.assertTrue(receipt['outcome_known'])
                 _verify_receipt_files(rp,receipt)
+                if inspection:
+                    delivered=json.dumps(requests[1]['messages'])
+                    self.assertIn('file_index_sha256',delivered);self.assertIn('README.md',delivered)
+                    self.assertNotIn('src/module/14999.F90',delivered)
+                    native=receipt['native_tool_calls'][0]
+                    reply=json.loads((rp.parent/'native-tool-results'/native['response_file']).read_bytes())
+                    self.assertEqual(reply['observation']['result']['files'],tree)
+                    self.assertEqual(reply['model_observation']['result']['file_count'],len(tree))
                 names={t['function']['name'] for t in requests[0]['tools']};self.assertIn('research_tool',names);self.assertNotIn('bash',names)
                 signature=next(t['function']['parameters'] for t in requests[0]['tools'] if t['function']['name']=='research_run')
                 self.assertEqual(set(signature['required']),{'source'})
@@ -245,6 +321,7 @@ class InstalledRuntimeTests(unittest.TestCase):
                 self.assertIn('receipt_ref',json.dumps(requests[2 if failure else 1]['messages']))
         finally:server.shutdown();server.server_close();thread.join()
     def test_installed_native_controller_roundtrip(self):self.exercise()
+    def test_installed_current_repository_inventory_is_a_view_with_full_raw_retained(self):self.exercise(inspection=True)
     def test_requested_isolated_review_uses_native_tools_without_author_or_schema(self):self.exercise(review=True)
     def test_known_tool_error_is_feedback_and_same_session_corrects_it(self):self.exercise(failure=True)
     def test_same_primary_restores_archives_and_reads_full_original_in_real_sandbox(self):self.exercise(resume=True)

@@ -16,6 +16,10 @@ export function nativeTools(mode) {
   return [...interfaceSpec[mode === 'research_work' ? 'work_tools' : 'intake_tools']];
 }
 
+export function nativeToolObservation(reply) {
+  return reply.model_observation ?? reply.observation ?? {outcome:'failed',error:reply.error};
+}
+
 export function projectNativeToolResult(text, callId, records = []) {
   for (const item of [...records].reverse()) {
     if (item.call_id !== callId) continue;
@@ -23,7 +27,7 @@ export function projectNativeToolResult(text, callId, records = []) {
     if (hash(raw) !== item.sha256) throw new Error('Retained tool result changed');
     const reply = JSON.parse(raw);
     if (reply.callId !== callId) throw new Error('Retained tool result lost its call owner');
-    const value = reply.observation ?? {outcome:'failed',error:reply.error};
+    const value = nativeToolObservation(reply);
     if (JSON.stringify(value) !== text) continue;
     return '<retained-tool-result>\n'+JSON.stringify({path:item.path,sha256:item.sha256,
       receipt_sha256:item.receipt_sha256,call_id:callId,outcome:value.outcome,
@@ -224,7 +228,7 @@ export function apply(ctx, config) {
             if (reply.channel !== bridge.channel || reply.sessionId !== sessionId || reply.callId !== callId)
               throw new Error('Native controller result lost its exact session/call owner');
             if (reply.terminal) exec.agent.cancel({kind:'parent'});
-            return reply.observation ?? {outcome:'failed',error:reply.error};
+            return nativeToolObservation(reply);
           }
           await delay(50, undefined, { signal: exec.signal });
         }

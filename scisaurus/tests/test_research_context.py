@@ -46,6 +46,26 @@ class ResearchContextTests(unittest.TestCase):
         self.assertEqual(json.loads(Path(refs['inputs']['assignment.json']['path']).read_bytes()),original)
         self.assertEqual(project_inline_research_inputs(actual.split('latest')[0],retained_inputs=[self.packet]),actual.split('latest')[0])
 
+    def test_current_checkpoint_inventory_view_is_idempotent_and_science_remains_exact(self):
+        inspection={'outcome':'ok','action':{'operation':'inspect','arguments':{'repository':'owner/solver'}},
+            'receipt_ref':'software:sha256:'+'f'*64,
+            'result':{'files':[{'path':'README.md'},{'path':'src/exact.F90'}],'tree_complete':True}}
+        run={'outcome':'ok','action':{'operation':'run','arguments':{'source':'physical source','input':{'E':3e9}}},
+             'result':{'source':'physical source','input':{'E':3e9},'raw':list(range(143))}}
+        assignment={'research_work':{'checkpoint':{'observation':inspection,'observations':[inspection,run]}}}
+        before=deepcopy(assignment);view=research_context_projection(assignment)
+        self.assertEqual(assignment,before)
+        self.assertEqual(view['research_work']['checkpoint']['observations'][1],run)
+        self.assertEqual(view['research_work']['checkpoint']['observation']['result']['file_count'],2)
+        self.assertEqual(view['research_work']['checkpoint']['observation']['result']['files'],[{'path':'README.md'}])
+        self.assertEqual(research_context_projection(view),view)
+        self.assertEqual(input_identity('assignment.json',canonical_bytes(assignment)),
+                         input_identity('assignment.json',canonical_bytes(view)))
+        altered=deepcopy(assignment);altered['research_work']['checkpoint']['observation']['result']['files'][1]['path']='src/changed.F90'
+        self.assertNotEqual(input_identity('assignment.json',canonical_bytes(assignment)),
+                            input_identity('assignment.json',canonical_bytes(altered)))
+
+
     def test_equal_historical_packets_both_reference_original(self):
         text=inline_inputs(self.files)*2
         self.assertEqual(project_inline_research_inputs(text,retained_inputs=[self.packet]).count('<retained-inputs>'),2)
@@ -138,6 +158,24 @@ assert.equal(projectNativeToolResult(JSON.stringify({...value,text:'changed'}),'
 writeFileSync(path,'{}');assert.throws(()=>projectNativeToolResult(text,'numeric',[item]),/changed/);
 const other=raw.replace('"numeric"','"wrong"');writeFileSync(path,other);const forged={...item,sha256:createHash('sha256').update(other).digest('hex')};
 assert.throws(()=>projectNativeToolResult(text,'numeric',[forged]),/call owner/);
+'''
+        for key,value in {'PLUGIN':(root/'scripts/dsh/intake-contract.mjs').as_uri(),'ROOT':str(self.root)}.items():code=code.replace(key,json.dumps(value))
+        result=subprocess.run([shutil.which('node') or '/Users/seungyeop/.hermes/node/bin/node','--input-type=module','-e',code],capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+
+    def test_native_archive_matches_current_inventory_view_without_changing_full_reply(self):
+        root=Path(__file__).resolve().parents[2]
+        code=r'''
+import assert from 'node:assert/strict';import {writeFileSync,readFileSync} from 'node:fs';import {createHash} from 'node:crypto';
+const {nativeToolObservation,projectNativeToolResult}=await import(PLUGIN),path=ROOT+'/view.json';
+const original={outcome:'ok',result:{files:[{path:'README.md'},{path:'src/exact.F90'}]}},view={outcome:'ok',result:{files:[{path:'README.md'}],file_count:2}};
+const raw=JSON.stringify({callId:'inventory',observation:original,model_observation:view});writeFileSync(path,raw);
+const item={path,sha256:createHash('sha256').update(raw).digest('hex'),call_id:'inventory',receipt_sha256:'receipt'};
+assert.deepEqual(nativeToolObservation(JSON.parse(raw)),view);
+const text=JSON.stringify(view);assert.match(projectNativeToolResult(text,'inventory',[item]),/<retained-tool-result>/);
+assert.equal(projectNativeToolResult(JSON.stringify(original),'inventory',[item]),JSON.stringify(original));
+assert.equal(readFileSync(path,'utf8'),raw);assert.deepEqual(nativeToolObservation({observation:original}),original);
+assert.deepEqual(nativeToolObservation({error:'actual failure'}),{outcome:'failed',error:'actual failure'});
 '''
         for key,value in {'PLUGIN':(root/'scripts/dsh/intake-contract.mjs').as_uri(),'ROOT':str(self.root)}.items():code=code.replace(key,json.dumps(value))
         result=subprocess.run([shutil.which('node') or '/Users/seungyeop/.hermes/node/bin/node','--input-type=module','-e',code],capture_output=True,text=True)

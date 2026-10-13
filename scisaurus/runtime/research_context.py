@@ -20,10 +20,16 @@ def _has_research_context(assignment):
 
 
 def research_context_projection(assignment):
-    """Keep research evidence inline and transport custody in its sealed ledger."""
+    """Keep scientific evidence inline and reference sealed dependency inventories."""
+    from scisaurus.runtime.software_workbench import project_receipt
     result=deepcopy(assignment)
     if not _has_research_context(result):return result
     checkpoint=result.get('research_work',{}).get('checkpoint',{})
+    if isinstance(checkpoint.get('observation'),dict):
+        checkpoint['observation']=project_receipt(checkpoint['observation'])
+    if isinstance(checkpoint.get('observations'),list):
+        checkpoint['observations']=[project_receipt(row) if isinstance(row,dict) else row
+                                  for row in checkpoint['observations']]
     for dispatch in checkpoint.get('review_dispatches',[]):
         if 'backend' in dispatch:
             dispatch['backend_sha256']=hashlib.sha256(canonical_bytes(dispatch.pop('backend'))).hexdigest()

@@ -7,6 +7,7 @@ import uuid
 from scisaurus.core.errors import ValidationError, StateError, NotFoundError, ProviderRateLimitError, ProviderConfigurationError
 from scisaurus.core.schema import canonical_bytes
 from scisaurus.runtime.run_control import ensure_run_allowed, RunPausedError
+from scisaurus.runtime.software_workbench import project_receipt
 
 METHOD = 'scisaurus/research-tool'
 TOOL = 'research_tool'
@@ -67,6 +68,9 @@ class NativeToolBridge:
                 raise ValidationError('native controller tool requires its recorded outcome')
             reply = {'channel': self.channel, 'sessionId': params['sessionId'],
                 'callId': params['callId'], 'observation': observation}
+            presentation = project_receipt(observation)
+            if presentation != observation:
+                reply['model_observation'] = presentation
             self.failed = observation['outcome'] == 'result_unknown'
             if self.failed:reply['terminal']=True
         except Exception as error:
