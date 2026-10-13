@@ -36,7 +36,7 @@ def checkpoint_response(receipt_path, receipt):
     return path, response
 
 
-def primary_observations(state):
+def primary_observations(state, *, receipt_path=None):
     """Recover actual observations from the primary's own sealed native receipts."""
     observations=[]
     for call in state['calls']:
@@ -46,6 +46,8 @@ def primary_observations(state):
         receipt=json.loads(raw)
         if receipt['session_id']!=state['session_id']:
             raise StateError('recorded tool evidence belongs to another primary')
+        if receipt_path is not None and path.resolve()!=Path(receipt_path).resolve():
+            continue
         for native in receipt.get('native_tool_calls',[]):
             if native.get('status')!='responded':continue
             result_path=path.parent/'native-tool-results'/native['response_file'];body=result_path.read_bytes()
@@ -61,15 +63,28 @@ def work_request(context, feedback=None):
     from scisaurus.runtime.requested_review import review_is_accounted
     if any(not review_is_accounted(x) for x in context['record'].get('review_dispatches',[])):
         raise StateError('unknown review dispatch requires its own accounting reconciliation')
-    delivered=json.loads((context['receipt_path'].parent/'input/assignment.json').read_bytes())
+    input_path=context['receipt_path'].parent/'input/assignment.json'
+    delivered_raw=input_path.read_bytes()
+    delivered=json.loads(delivered_raw)
     inherited=delivered.get('research_work',{}).get('checkpoint',{})
-    observations=[*inherited.get('observations',[]),context['record'].get('observation') or {},
+    current=[context['record'].get('observation') or {},
                   *context['record'].get('observations',[])]
-    observations.extend(primary_observations(context['state']))
+    current.extend(primary_observations(context['state'],receipt_path=context['receipt_path']))
+    observations=[*inherited.get('observations',[]),*current]
+    if not inherited:
+        observations.extend(primary_observations(context['state']))
     observations=list({x.get('receipt_ref') or (index,):x for index,x in enumerate(observations) if x}.values())
     if (any(x.get('outcome')=='result_unknown' for x in observations)
             or any(x.get('status')=='requested' for x in context['receipt'].get('native_tool_calls',[]))):
         raise StateError('unknown tool execution requires reconciliation before further work')
+    archive=({'archived_checkpoint':deepcopy(inherited['archived_checkpoint'])}
+             if 'archived_checkpoint' in inherited else {})
+    if inherited and any(current):
+        archive={'archived_checkpoint':{'path':str(input_path.resolve()),
+            'sha256':sha(delivered_raw),'receipt_sha256':sha(context['receipt_path'].read_bytes()),
+            'json_pointer':'/research_work/checkpoint',
+            'retrieval':'Use read_retained_input for the exact checkpoint, including earlier archive references.'}}
+        observations=list({x.get('receipt_ref') or (index,):x for index,x in enumerate(current) if x}.values())
     response=context['response'];source_path=context['response_path']
     if response is None:
         for call in reversed(context['state']['calls']):
@@ -85,7 +100,7 @@ def work_request(context, feedback=None):
             for block in data.get('message',{}).get('content',[]):
                 if block.get('isError') and block.get('toolCallId') in calls:
                     failures.append({'call':deepcopy(calls[block['toolCallId']]),'result':deepcopy(block)})
-    return {'kind':'research_work',**({'feedback':feedback} if feedback is not None else {}),'checkpoint':{
+    return {'kind':'research_work',**({'feedback':feedback} if feedback is not None else {}),'checkpoint':{**archive,
         'receipt_sha256':sha(context['receipt_path'].read_bytes()),
         'prior_outcome':context['receipt']['status'],
         'reported_usage':deepcopy(context['receipt']['usage']),

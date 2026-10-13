@@ -181,6 +181,42 @@ try {
             self.assertEqual(work_request(context)['checkpoint']['observations'],[prior])
             self.assertEqual((archive/'native-tool-results/error.json').read_bytes(),error)
 
+    def test_current_execution_keeps_raw_inline_and_archives_previous_checkpoint_exactly(self):
+        from scisaurus.runtime.primary_work import work_request
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            job=Path(directory);(job/'input').mkdir();(job/'native-tool-results').mkdir()
+            (job/'events.jsonl').write_text('');note=job/'notes.md';note.write_text('current notes')
+            prior={'outcome':'ok','receipt_ref':'prior','result':{'source':'prior source','output':[1,2]}}
+            old={'observations':[prior],'archived_checkpoint':{'path':'earlier','sha256':'old'}}
+            input_path=job/'input/assignment.json'
+            input_path.write_bytes(canonical_bytes({'research_work':{'checkpoint':old}}))
+            current={'outcome':'ok','receipt_ref':'current','result':{'source':'current source','output':[3,4]}}
+            body=canonical_bytes({'observation':current});(job/'native-tool-results/result.json').write_bytes(body)
+            receipt={'session_id':'same','status':'completed','usage':{'model_calls':1},'native_tool_calls':[
+                {'status':'responded','response_file':'result.json','response_sha256':sha(body)}]}
+            path=job/'receipt.json';path.write_bytes(canonical_bytes(receipt))
+            context={'record':{'observations':[current]},'receipt':receipt,'receipt_path':path,
+                'response':{'notes':'current notes'},'response_path':note,
+                'state':{'session_id':'same','calls':[{'receipt':str(path),'sha256':sha(path.read_bytes())}]}}
+            checkpoint=work_request(context)['checkpoint']
+            self.assertEqual(checkpoint['observations'],[current])
+            archive=checkpoint['archived_checkpoint']
+            self.assertEqual(archive['path'],str(input_path.resolve()))
+            self.assertEqual(archive['sha256'],sha(input_path.read_bytes()))
+            self.assertEqual(json.loads(Path(archive['path']).read_bytes())['research_work']['checkpoint'],old)
+            input_path.write_bytes(canonical_bytes({'research_work':{'checkpoint':checkpoint}}))
+            context['state']['calls']=[];context['record']['observations']=[]
+            context['receipt']={**receipt,'native_tool_calls':[]}
+            carried=work_request(context)['checkpoint']
+            self.assertEqual(carried['archived_checkpoint'],archive)
+            self.assertEqual(carried['observations'],[current])
+            input_path.write_bytes(canonical_bytes({'research_work':{'checkpoint':{
+                'observations':[{'outcome':'result_unknown'}]}}}))
+            context['record']['observations']=[current]
+            with self.assertRaisesRegex(StateError,'unknown tool execution'):
+                work_request(context)
+
     def mocked_note(self,ticket,delivery=True,notes=None,workspace_notes=None):
         args=self.preflight(ticket);root,cp,backend,assignment,protected=args;t=json.loads(ticket.read_bytes())
         assignment=work_assignment(assignment,t['step_request']);stub=object.__new__(IntakePrimaryClient);inputs=stub.input_files(assignment,'primary work')
