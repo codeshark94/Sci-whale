@@ -82,6 +82,9 @@ capacity. Every provider request reserves that output space against measured
 input pressure. Summary streams retain their complete chunks and usage under
 the owning compaction identity, including partial failed calls. Stream usage
 and the completed summary record are reconciled once rather than double counted.
+The context plugin declares its accounting event vocabulary in the exact pinned
+session module before restoration. Original journals need no rewrite; unrelated
+unknown required event types remain refused by the persistence reader.
 
 The deployment invokes the native engine directly instead of its warning-only
 automatic handler. Summary failures propagate before another research request.

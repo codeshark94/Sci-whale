@@ -9,7 +9,7 @@ from scisaurus.runtime.dsh_context import CONTEXT_PACKAGES
 def context_backend(root, backend):
     backend.setdefault('max_output_tokens', 32768)
     pins = backend.setdefault('pinned_files', {})
-    for identity, name in CONTEXT_PACKAGES.items():
+    for identity, name in {**CONTEXT_PACKAGES,'session':'@deepseek-ai/dsh-session'}.items():
         directory = Path(root) / 'context-packages' / identity
         directory.mkdir(parents=True, exist_ok=True)
         files = {directory / 'package.json': json.dumps({'name': name, 'main': 'index.js'}).encode(),

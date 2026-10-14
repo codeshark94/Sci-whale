@@ -31,9 +31,13 @@ export async function assertRequestCapacity(ctx, session, options, outputReserva
   return {tokens, output, capacity};
 }
 
-export function apply(ctx, config) {
+export async function apply(ctx, config) {
   if (!Number.isSafeInteger(config.maxOutputTokens) || config.maxOutputTokens <= 0)
     throw new Error('Context policy requires a positive generation reservation');
+  const {KNOWN_SESSION_EVENT_TYPES}=await import(config.sessionModule);
+  // The persistence reader and this writer share the exact pinned catalog.
+  // Register only this plugin's non-surface accounting vocabulary before resume.
+  KNOWN_SESSION_EVENT_TYPES.add('scisaurus/compaction-call');
   const owners = new Map();
   ctx.on('agent/pre-step', async (event, next) => {
     const decision = await next();

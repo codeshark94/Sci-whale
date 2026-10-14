@@ -8,7 +8,7 @@ import zipfile
 from scisaurus.core.errors import StateError
 from scisaurus.core.schema import canonical_bytes
 from scisaurus.runtime.fresh_intake import sha
-from scisaurus.runtime.dsh_context import context_composition, context_entries
+from scisaurus.runtime.dsh_context import context_composition, context_entries, context_policy_config
 
 GUARD_READY = 'SCISAURUS_NATIVE_RESEARCH_READY:tools-feedback-checkpoints-1'
 
@@ -61,7 +61,7 @@ def guard_backend(backend, directory, runtime_python, *, work_mode=False, review
     if work_mode or review_mode:config['mode']='research_review' if review_mode else 'research_work'
     composition.append({'id':'intake-contract','name':str((policy/'intake-contract.mjs').resolve()),'config':config})
     composition.append({'id':'context-policy','name':str((policy/'context-policy.mjs').resolve()),
-                        'config':{'maxOutputTokens':backend['max_output_tokens']}})
+                        'config':context_policy_config(backend)})
     sealed_file(policy/'composition.json',canonical_bytes(composition))
     active=deepcopy(backend);active['composition']=str((policy/'composition.json').resolve())
     if str(policy.resolve()) not in active['read_roots']:
@@ -95,7 +95,7 @@ def guarded_backend(backend):
             or interface.read_bytes()!=(source_root/'research-tools.json').read_bytes()):
         raise StateError('native tool interface differs from its authoritative source')
     contexts=[x for x in composition if x.get('id')=='context-policy']
-    if (len(contexts)!=1 or contexts[0].get('config')!={'maxOutputTokens':backend['max_output_tokens']}):
+    if (len(contexts)!=1 or contexts[0].get('config')!=context_policy_config(backend)):
         raise StateError('native context policy differs from its generation reservation')
     path=Path(contexts[0]['name'])
     if (backend['pinned_files'].get(str(path))!=sha(path.read_bytes())

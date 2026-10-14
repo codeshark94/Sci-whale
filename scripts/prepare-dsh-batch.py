@@ -78,7 +78,8 @@ for entry_config in composition:
 context_path = output.with_suffix('.context.mjs')
 context_path.write_bytes((repository / 'scripts/dsh/context-policy.mjs').read_bytes())
 composition.append({'id': 'context-policy', 'name': str(context_path),
-                    'config': {'maxOutputTokens': args.max_output_tokens}})
+                    'config': {'maxOutputTokens': args.max_output_tokens,
+                               'sessionModule': str(packages['@deepseek-ai/dsh-session'].resolve())}})
 composition_path.write_text(json.dumps(composition, indent=2) + "\n")
 files = {node, entry, composition_path, context_path, root / "package.json", root / "pnpm-lock.yaml"}
 files.update((root / "packages").glob("*/**/lib/**/*.js"))

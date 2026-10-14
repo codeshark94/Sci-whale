@@ -1,6 +1,8 @@
 /** Exercise native compaction against an in-process deterministic adapter. */
 import assert from 'node:assert/strict';
 import {pathToFileURL} from 'node:url';
+import {mkdtemp,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
 
 const [base, policyPath] = process.argv.slice(2);
 const load = path => import(pathToFileURL(base + '/' + path).href);
@@ -14,6 +16,8 @@ const {default:Loop} = await load('core/agent-loop/lib/index.js');
 const {default:Meter} = await load('llm/token-meter/lib/index.js');
 const {default:Compaction} = await load('compaction/compaction-basic/lib/index.js');
 const {default:Pruner} = await load('compaction/compaction-tool-result-pruner/lib/index.js');
+const {default:Persistence} = await load('session/session-persistence-jsonl/lib/index.js');
+const {KNOWN_SESSION_EVENT_TYPES} = await load('core/session/lib/index.js');
 const policy = await import(pathToFileURL(policyPath).href);
 
 async function exercise(failed, ratio=.89, pendingText="Continue the same frozen assignment.", mode="summary") {
@@ -39,7 +43,7 @@ async function exercise(failed, ratio=.89, pendingText="Continue the same frozen
     await ctx.plugin(Meter);
     await ctx.plugin(Pruner);
     await ctx.plugin(Compaction,{auto:false,maxTokens:32768,compactionRetries:0,maxOverflowRetries:0});
-    await ctx.plugin(policy,{maxOutputTokens:32768});
+    await ctx.plugin(policy,{maxOutputTokens:32768,sessionModule:base+'/core/session/lib/index.js'});
     ctx.llm.registerAdapter(['offline'],new Adapter());
     const agent=ctx.agentLoop.create(SessionId(failed?'offline-failed':'offline-preserved'),
       {provider:'offline',model:'fixed',maxTokens:32768});
@@ -92,4 +96,30 @@ async function exercise(failed, ratio=.89, pendingText="Continue the same frozen
       compacted:agent.session.events.some(e=>e.type==='compaction/summary'),calls};
   } finally {await ctx.fiber.dispose();}
 }
-console.log(JSON.stringify({native_success:await exercise(false),native_failure:await exercise(true),low_reservation:await exercise(false,.78),high_pressure:await exercise(false,.958),pending_input:await exercise(false,.69,'Current immutable evidence '.repeat(2000)),prune_only:await exercise(false,0,'Continue.','prune'),oversized_input:await exercise(false,0,'oversized evidence '.repeat(40000),'oversized'),live_provider_calls:0}));
+async function persistedReplay() {
+  const directory=await mkdtemp(tmpdir()+'/native-context-replay-');
+  let ctx=new Context();
+  try {
+    await ctx.plugin(SessionStore);
+    await ctx.plugin(Persistence,{root:directory,compression:'none'});
+    const session=ctx.sessions.create(SessionId('persisted-audit-event'));
+    session.append('scisaurus/compaction-call',{phase:'chunk',compactionId:'old-summary',turn:1,step:0,chunk:{type:'usage',usage:{inputTokens:17,outputTokens:3}}});
+    await ctx.sessions.flush(session);
+    await ctx.fiber.dispose();
+    ctx=new Context();
+    await ctx.plugin(SessionStore);
+    await ctx.plugin(Persistence,{root:directory,compression:'none'});
+    KNOWN_SESSION_EVENT_TYPES.delete('scisaurus/compaction-call');
+    await assert.rejects(()=>ctx.sessionPersistence.load(session.id),/unknown to this harness/);
+    await ctx.fiber.dispose();
+    ctx=new Context();
+    await ctx.plugin(SessionStore);
+    await ctx.plugin(Persistence,{root:directory,compression:'none'});
+    const handlers={on:()=>{},compaction:{},llm:{},sessions:{}};
+    await policy.apply(handlers,{maxOutputTokens:32768,sessionModule:base+'/core/session/lib/index.js'});
+    const loaded=await ctx.sessionPersistence.load(session.id);
+    assert.ok(loaded.events.some(e=>e.type==='scisaurus/compaction-call'&&e.data.chunk.usage.inputTokens===17));
+    return {old_unmarked_event_replayed:true,original_paid_usage_preserved:true};
+  } finally {await ctx.fiber.dispose();await rm(directory,{recursive:true,force:true});}
+}
+console.log(JSON.stringify({native_success:await exercise(false),native_failure:await exercise(true),low_reservation:await exercise(false,.78),high_pressure:await exercise(false,.958),pending_input:await exercise(false,.69,'Current immutable evidence '.repeat(2000)),prune_only:await exercise(false,0,'Continue.','prune'),oversized_input:await exercise(false,0,'oversized evidence '.repeat(40000),'oversized'),persisted_replay:await persistedReplay(),live_provider_calls:0}));

@@ -13,6 +13,12 @@ CONTEXT_PACKAGES = {
 }
 
 
+def context_policy_config(backend):
+    package='@deepseek-ai/dsh-session'
+    return {'maxOutputTokens':backend['max_output_tokens'],
+            'sessionModule':pinned_package_entries(backend,[package])[package]}
+
+
 def context_entries(max_output_tokens):
     """Use SDK retention defaults and one summary attempt on the current route."""
     if type(max_output_tokens) is not int or max_output_tokens <= 0:

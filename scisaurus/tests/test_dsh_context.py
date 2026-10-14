@@ -83,7 +83,7 @@ const ctx={on:(name,f)=>handlers.set(name,f),get:()=>undefined,sessions:{get:()=
  llm:{resolveModelInfo:async()=>({context:{contextWindow:1000}})},
  tokenMeter:{estimateMessage:()=>100,estimateHeader:()=>0,measure:()=>({totalTokens:900,surfaceTokens:900})},
  compaction:{config:{thresholdRatio:.8},compactIfNeeded:async()=>{log.push('native-compaction');ctx.tokenMeter.measure=()=>({totalTokens:100,surfaceTokens:100});return {};}}};
-apply(ctx,{maxOutputTokens:100});
+await apply(ctx,{maxOutputTokens:100,sessionModule:'data:text/javascript,export const KNOWN_SESSION_EVENT_TYPES=new Set()'});
 const e={agent:{session,options:{provider:'fixed',model:'owned'}},signal:new AbortController().signal,turn:2,step:3};
 await handlers.get('agent/pre-step')(e,async()=>{log.push('project-inputs');return {kind:'enter',messages:[]};});
 assert.deepEqual(log.slice(0,2),['project-inputs','native-compaction']);
