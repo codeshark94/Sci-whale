@@ -15,7 +15,8 @@ def review_usage_owner(receipt):
     return 'final-audit:' + str(receipt)
 
 
-def request_review(configured, root, evidence, *, deadline, isolated_from, record, laboratory=None):
+def request_review(configured, root, evidence, *, deadline, isolated_from, record, laboratory=None,
+                   source_workbench=None):
     from scisaurus.runtime.program_sandbox import sandbox_read_grants, require_isolated_read_grants
     identity=hashlib.sha256(canonical_bytes(evidence)).hexdigest()
     root=Path(root)/identity/uuid.uuid4().hex
@@ -34,6 +35,16 @@ def request_review(configured, root, evidence, *, deadline, isolated_from, recor
     from scisaurus.runtime.primary_work import work_assignment,native_tool_handler
     from scisaurus.runtime.software_workbench import SoftwareWorkbench
     assignment=deepcopy(evidence)
+    computation=SoftwareWorkbench(root/'computation',deadline=deadline,laboratory=laboratory)
+    if evidence.get('inputs'):
+        from scisaurus.core.errors import ValidationError
+        if source_workbench is None:
+            raise ValidationError('review artifact inputs require their owning workbench')
+        copied=source_workbench.copy_inputs_to(computation,evidence['inputs'])
+        assignment['review_input_provenance']=copied
+        assignment['inputs']=assignment['review_inputs']=[{'artifact_ref':row['artifact_ref'],'name':row['name']}
+            for row in copied]
+        assignment['review_input_usage']='Use research_run inputs to stage these verified artifacts under inputs/. Only explicitly supplied artifacts are available; producer history is excluded.'
     tools=work_assignment({}, {'kind':'research_work'})['scientific_software_tools']
     tools['actions']={key:value for key,value in tools['actions'].items()
         if key in {'check_environment','list_runtimes','inspect_runtime','run'}}
@@ -45,7 +56,7 @@ def request_review(configured, root, evidence, *, deadline, isolated_from, recor
     client.deadline=deadline
     client.runner.task_contract['native_controller_tools']=True
     client.runner.native_tool_handler=native_tool_handler(assignment,
-        SoftwareWorkbench(root/'computation',deadline=deadline,laboratory=laboratory),{})
+        computation,{})
     record(deepcopy(dispatch))
     try:
         result=client.complete(system='Independent review of explicitly supplied evidence. Perform isolated checks when useful; do not modify or replace the research author.',prompt=json.dumps(assignment))

@@ -20,6 +20,43 @@ from scisaurus.runtime.requested_review import request_review,reconcile_review,r
 
 
 class RequestedReviewTests(unittest.TestCase):
+    def test_selected_raw_artifacts_are_copied_without_producer_roots(self):
+        from scisaurus.runtime.software_workbench import SoftwareWorkbench
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);producer=root/'producer';producer.mkdir();shared=root/'shared';shared.mkdir()
+            source=SoftwareWorkbench(producer/'data',deadline=time.monotonic()+20)
+            raw=b'current exact raw field';ref=source._retain_artifact(raw)
+            owner_ref='software:sha256:'+'a'*64
+            inputs=[{'artifact_ref':ref,'name':'current/field.bin','source_receipt_ref':owner_ref}]
+            source._receipt=Mock(return_value={'result':{'outputs':[{'artifact_ref':ref}]}})
+            backend={'read_roots':[str(producer),str(shared)],'pinned_files':{},'command':[sys.executable]}
+            client=Mock();client.runner.task_contract={}
+            client.complete.return_value=ModelResult(json.dumps({'notes':'field available'}),'fixed',{'model_calls':1},0,'stop',response_metadata={'receipt':'offline'})
+            records=[]
+            with patch('scisaurus.runtime.requested_review.guard_backend',side_effect=lambda backend,*a,**kw:backend), \
+                 patch('scisaurus.runtime.program_sandbox.sandbox_read_grants',return_value=([],[])), \
+                 patch('scisaurus.runtime.program_sandbox.require_isolated_read_grants'), \
+                 patch('scisaurus.runtime.requested_review.PrimaryClient',return_value=client):
+                request_review({'author_backend':backend,'runtime_python':sys.executable},producer/'reviews',
+                    {'task':'recalculate','inputs':inputs},deadline=time.monotonic()+20,
+                    isolated_from=[producer],record=records.append,source_workbench=source)
+            dispatch=records[-1];assignment=json.loads(client.complete.call_args.kwargs['prompt'])
+            self.assertEqual(assignment['review_input_provenance'][0]['sha256'],hashlib.sha256(raw).hexdigest())
+            self.assertEqual(assignment['review_inputs'],[{'artifact_ref':ref,'name':'current/field.bin'}])
+            self.assertEqual(assignment['inputs'],assignment['review_inputs'])
+            peer=SoftwareWorkbench(Path(dispatch['dispatch_root'])/'computation',deadline=time.monotonic()+20)
+            self.assertEqual(peer._read_artifact(ref),raw)
+            declared=peer._declared_inputs(assignment['review_inputs'],peer._effective_limits())
+            staged_root=root/'staged-review'
+            peer._stage_inputs(declared,staged_root)
+            self.assertEqual((staged_root/'inputs/current/field.bin').read_bytes(),raw)
+            self.assertFalse((peer.root/'receipts'/(owner_ref.split(':')[-1]+'.json')).exists())
+            self.assertEqual(dispatch['backend']['read_roots'],[str(shared)])
+            self.assertNotIn('development_session',assignment)
+            (source.root/'artifacts'/ref.split(':')[-1]).write_bytes(b'changed')
+            with self.assertRaisesRegex(Exception,'content changed'):
+                source.copy_inputs_to(peer,inputs)
+
     def test_common_native_tool_requests_feedback_without_workbench_author(self):
         assignment=work_assignment({}, {'kind':'research_work'});bench=Mock();review=Mock(return_value={'outcome':'ok','feedback':{'notes':'unresolved'}});record={}
         result=native_tool_handler(assignment,bench,record,review=review)({'operation':'request_review','arguments':{'evidence':[1,2]}})
@@ -127,6 +164,8 @@ class PrimaryBackendTests(unittest.TestCase):
         from scisaurus.runtime.development_session import DevelopmentSession
         from scisaurus.runtime.primary_client import prepare_primary_backend,current_primary_backend
         fixture=DevelopmentSessionTests();fixture.setUp();self.addCleanup(fixture.tearDown)
+        from scisaurus.tests.context_fixtures import context_backend
+        context_backend(fixture.project,fixture.config)
         with DevelopmentSession(fixture.binding).lease(fixture.config,time.monotonic()+1) as session:
             original=deepcopy(session.state)
         backend=prepare_primary_backend(fixture.config,fixture.project/'intake-controller',sys.executable,fixture.binding)

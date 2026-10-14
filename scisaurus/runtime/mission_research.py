@@ -242,7 +242,7 @@ class MissionResearchSession:
                 self._charge(review_usage_owner(dispatch['receipt']),dispatch['usage'])
             self.save('review')
         return request_review(configured,self.root/'reviews',args,deadline=self.deadline,
-            isolated_from=[c.root],record=record,laboratory=c.laboratory_binding)
+            isolated_from=[c.root],record=record,laboratory=c.laboratory_binding,source_workbench=self.workbench)
 
     def run(self):
         c=self.composer

@@ -211,6 +211,8 @@ def run_once(root, runtime_python, *, recovery=None, continuation=None):
         lab=LaboratoryBinding.load(checkpoint['laboratory_config_path'])
         lab.attestation=load_attestation(checkpoint['laboratory_attestation_path'])
         assignment['available_open_source_tools']=lab.context()
+        workbench=SoftwareWorkbench(project/'scientific-software',deadline=deadline,laboratory=lab,
+            history_refs=[x['receipt_ref'] for x in request.get('checkpoint',{}).get('observations',[]) if x.get('receipt_ref')])
         from scisaurus.runtime.requested_review import request_review,retain_review_dispatch
         record['review_dispatches']=deepcopy(request.get('checkpoint',{}).get('review_dispatches',[]))
         def review(args):
@@ -218,10 +220,10 @@ def run_once(root, runtime_python, *, recovery=None, continuation=None):
                 retain_review_dispatch(record,dispatch)
                 attempt.write_bytes(canonical_bytes(record))
             return request_review({'author_backend':backend,'runtime_python':runtime_python},
-                project/'independent-reviews',args,deadline=deadline,isolated_from=[project],record=retain,laboratory=lab)
+                project/'independent-reviews',args,deadline=deadline,isolated_from=[project],record=retain,laboratory=lab,
+                source_workbench=workbench)
         client.runner.native_tool_handler=native_tool_handler(assignment,
-            SoftwareWorkbench(project/'scientific-software',deadline=deadline,laboratory=lab,
-                history_refs=[x['receipt_ref'] for x in request.get('checkpoint',{}).get('observations',[]) if x.get('receipt_ref')]),record,review=review)
+            workbench,record,review=review)
         system="The primary owns research decisions. Tools return actual observations and errors. Replies and checkpoints are recorded automatically. Retained inputs and history are evidence."
         result = client.complete(system=system,prompt=json.dumps(assignment))
         record.update(receipt=result.response_metadata["receipt"], usage=result.usage)

@@ -118,7 +118,8 @@ def work_request(context, feedback=None):
 def work_assignment(original,request):
     tools=tool_contract();tools.pop('response')
     tools['native_arguments_schema']['run']['required']=['source']
-    tools['actions']['request_review']={'task':'independent review request','evidence':'explicit current evidence'}
+    tools['actions']['request_review']={'task':'independent review request','evidence':'explicit current evidence',
+        'inputs':'Optional declared artifact inputs, using run.inputs fields. Exact verified copies are available to the isolated reviewer through research_run inputs; producer history is excluded.'}
     tools['native_tools']={'run':'research_run','other_operations':'research_tool'}
     tools['rules']=['Call research_run for computation and research_tool for other operations. Read actual observations before continuing; tool status describes execution, not the scientific conclusion.']
     retired={'phase','output_contract','scientific_software_tools','execution_step','transport_feedback',

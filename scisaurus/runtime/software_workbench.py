@@ -667,6 +667,15 @@ class SoftwareWorkbench:
             staged.append({**row, "staged_path": "inputs/" + row["name"]})
         return staged
 
+    def copy_inputs_to(self, target, inputs):
+        """Copy explicitly selected, verified artifacts into an isolated workbench."""
+        declared = self._declared_inputs(inputs, self._effective_limits())
+        for row in declared:
+            raw = self._read_artifact(row['artifact_ref'])
+            if target._retain_artifact(raw) != row['artifact_ref']:
+                raise ValidationError('copied evidence artifact identity changed')
+        return declared
+
     def _workspace_guard(self, root, limits):
         total = count = 0
         for parent, dirs, files in os.walk(root, followlinks=False):
